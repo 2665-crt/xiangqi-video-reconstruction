@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "model_sha256": "da66ba9809f15127f8ae729b1755e42ee61c100c4f9979ce0ef13602ac471298",
+  "source": "https://huggingface.co/spaces/yolo12138/Chinese_Chess_Recognition/commit/19a60be042982793322d36d51e8aecada98f0b76",
+  "source_file": "onnx/layout_recognition/nano_v3-0319.onnx",
+  "role": "local corroboration only; cannot add occupied squares or silently override piece kinds",
+  "input": "RGB 280x315, ImageNet mean and std, grid edges cropped to 8x9 cells",
+  "classes": ["point", "other", "red_king", "red_advisor", "red_elephant", "red_horse", "red_rook", "red_cannon", "red_pawn", "black_king", "black_advisor", "black_elephant", "black_horse", "black_rook", "black_cannon", "black_pawn"]
+}
