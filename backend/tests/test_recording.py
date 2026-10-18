@@ -1,3 +1,4 @@
+import json
 import time
 import subprocess
 import sys
@@ -33,11 +34,14 @@ def test_playlist_removes_source_waits_and_keeps_initial_and_final(recording_tas
 
 
 @pytest.mark.parametrize('status', ['needs_review', 'tentative'])
-def test_unresolved_step_blocks_export_with_step_number(recording_task, status):
+def test_unresolved_step_exports_saved_position_without_confirming_it(recording_task, status):
     from app.recording import build_recording_playlist
     recording_task.moves[0].status = status
-    with pytest.raises(ValueError, match='第 1'):
-        build_recording_playlist(recording_task, 1)
+    before = recording_task.model_dump_json()
+    payload = build_recording_playlist(recording_task, 1)
+    assert payload['records'][0]['position_after'] == recording_task.moves[0].position_after.model_dump()
+    assert payload['records'][0]['status'] == status
+    assert recording_task.model_dump_json() == before
 
 
 def test_initial_draft_is_not_a_confirmed_initial_position(recording_task):
@@ -47,11 +51,36 @@ def test_initial_draft_is_not_a_confirmed_initial_position(recording_task):
         build_recording_playlist(recording_task, 1)
 
 
-def test_corrected_interrupted_analysis_cannot_export_missing_tail(recording_task):
+def test_interrupted_analysis_exports_available_steps(recording_task):
     from app.recording import build_recording_playlist
     recording_task.processed_video_s = 80
     recording_task.moves[0].status = 'corrected'
-    with pytest.raises(ValueError, match='完整'):
+    payload = build_recording_playlist(recording_task, 1)
+    assert len(payload['records']) == 1
+    assert payload['total_frames'] == 120
+
+
+@pytest.mark.parametrize('status', ['analyzing', 'waiting_service', 'action_required', 'interrupted', 'failed'])
+def test_task_status_does_not_block_available_steps(recording_task, status):
+    from app.recording import build_recording_playlist
+    recording_task.status = status
+    recording_task.pending_turn = recording_task.moves[0].model_copy(deep=True)
+    recording_task.processed_video_s = 70
+    payload = build_recording_playlist(recording_task, 1)
+    assert len(payload['records']) == 1
+
+
+@pytest.mark.parametrize('status', ['needs_review', 'tentative'])
+def test_hidden_review_does_not_block_or_add_a_video_step(recording_task, status):
+    from app.recording import build_recording_playlist
+    recording_task.moves.append(MoveRecord(index=2, video_start_s=61, video_end_s=90, status=status, change_type='review'))
+    assert len(build_recording_playlist(recording_task, 1)['records']) == 1
+
+
+def test_only_review_records_cannot_create_an_empty_game_video(recording_task):
+    from app.recording import build_recording_playlist
+    recording_task.moves = [MoveRecord(index=1, video_start_s=61, video_end_s=90, status='needs_review', change_type='review')]
+    with pytest.raises(ValueError, match='步骤'):
         build_recording_playlist(recording_task, 1)
 
 
@@ -63,18 +92,30 @@ def test_review_only_record_is_not_an_extra_video_step(recording_task):
     assert payload['total_frames'] == 120
 
 
-def test_missing_position_cannot_silently_skip_a_move(recording_task):
+def test_missing_position_is_built_from_saved_move_without_mutating_task(recording_task):
     from app.recording import build_recording_playlist
     recording_task.moves[0].position_after = None
-    with pytest.raises(ValueError, match='第 1'):
-        build_recording_playlist(recording_task, 1)
+    recording_task.moves[0].status = 'needs_review'
+    before = recording_task.model_dump_json()
+    payload = build_recording_playlist(recording_task, 1)
+    assert payload['records'][0]['position_after']['pieces'][0]['square'] == {'file':0, 'rank':5}
+    assert not any(p['id'] == 'p' for p in payload['records'][0]['position_after']['pieces'])
+    assert recording_task.model_dump_json() == before
 
 
-def test_out_of_range_record_is_rejected(recording_task):
+def test_saved_steps_export_even_when_video_time_needs_correction(recording_task):
     from app.recording import build_recording_playlist
     recording_task.moves[0].video_end_s = 121
-    with pytest.raises(ValueError, match='选区'):
-        build_recording_playlist(recording_task, 1)
+    assert len(build_recording_playlist(recording_task, 1)['records']) == 1
+
+
+def test_export_manifest_is_independent_of_later_edits(recording_task):
+    from app.recording import build_recording_playlist
+    payload = build_recording_playlist(recording_task, 1)
+    recording_task.moves[0].position_after.pieces[0].square.file = 3
+    recording_task.moves[0].status = 'needs_review'
+    assert payload['records'][0]['position_after']['pieces'][0]['square']['file'] == 0
+    assert payload['records'][0]['status'] == 'auto_verified'
 
 
 def test_export_api_revision_and_status_persist_without_mutating_task(tmp_path, recording_task, monkeypatch):
@@ -99,6 +140,27 @@ def test_export_api_revision_and_status_persist_without_mutating_task(tmp_path, 
         assert client.get(f'/api/tasks/{stored.id}/recordings/latest').json()['id'] == job['id']
         assert app.state.store.get(stored.id).revision == stored.revision
         assert client.get(f'/api/recordings/{job["id"]}/video').status_code == 409
+
+
+def test_export_api_keeps_saved_unreviewed_snapshot_in_rules_mode(tmp_path, recording_task, monkeypatch):
+    from app.main import create_app
+    from app.recording import RecordingManager
+    monkeypatch.setattr(RecordingManager, '_run', lambda self, job_id: None)
+    app = create_app(tmp_path / 'data', recording_root=tmp_path / 'videos')
+    task = app.state.store.create(recording_task.filename, recording_task.metadata)
+    recording_task.id = task.id
+    recording_task.rules_enabled = True
+    recording_task.moves[0].status = 'needs_review'
+    recording_task.moves[0].position_after.pieces[0].square = Square(file=0, rank=4)
+    saved = app.state.store.save(recording_task, 0)
+    with TestClient(app) as client:
+        response = client.post(f'/api/tasks/{saved.id}/recordings', json={'revision':saved.revision,'interval_s':1})
+        assert response.status_code == 202
+        manifest = app.state.recordings.root / response.json()['id'] / 'manifest.json'
+        payload = json.loads(manifest.read_text(encoding='utf8'))
+        assert payload['records'][0]['position_after']['pieces'][0]['square']['rank'] == 4
+        assert payload['records'][0]['status'] == 'needs_review'
+        assert app.state.store.get(saved.id).model_dump_json() == saved.model_dump_json()
 
 
 def test_failed_encoding_does_not_publish_a_video(tmp_path, recording_task, monkeypatch):

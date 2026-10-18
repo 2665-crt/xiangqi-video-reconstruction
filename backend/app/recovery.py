@@ -194,7 +194,7 @@ class ReplayStore:
         if not self.caught_up and any(any(getattr(old, key) != getattr(new, key) for key in fields)
                for old, new in zip(self.frontier, task.moves)):
             raise ValueError('恢复重建与已保存棋谱不一致，原棋谱已保留，请管理员检查')
-        copy = task.model_copy(deep=True)
+        copy = task.model_copy(update={'moves': list(task.moves)})
         copy.rebuild_video_s = copy.rebuild_target_s = None
         copy.processed_video_s = max(copy.processed_video_s, latest.processed_video_s)
         if not self.caught_up:
@@ -205,8 +205,15 @@ class ReplayStore:
         task.revision, task.recovery = saved.revision, saved.recovery
         return task
 
+    def save_progress(self, task):
+        if not self.caught_up:
+            return self.save_analysis(task)
+        saved = self.store.save_progress(task)
+        task.revision, task.recovery = saved.revision, saved.recovery
+        return task
 
-def save_boundary_checkpoint(store, task, time_s, context):
+
+def save_boundary_checkpoint(store, task, time_s, context, tracking_calibration=None, motion_active=False, motion_reference_s=None):
     backing = getattr(store, 'store', store)
     if task.recovery is None or not task.recovery.auto_run:
         return
@@ -217,6 +224,9 @@ def save_boundary_checkpoint(store, task, time_s, context):
     seed.context_position = context.model_copy(deep=True)
     seed.pending_turn = None
     seed.resume_video_s = time_s
+    seed.resume_calibration = tracking_calibration
+    seed.resume_motion_active = motion_active
+    seed.resume_motion_reference_s = motion_reference_s
     seed.processed_video_s = time_s
     seed.recognition_video_s = time_s
     seed.recovery = None

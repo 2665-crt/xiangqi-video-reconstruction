@@ -9,6 +9,7 @@ import type { Task } from './types';
 const initial = { pieces: [{ id: 'r', color: 'red', kind: 'rook', square: { file: 0, rank: 9 } }], side_to_move: 'red' };
 const saved = { ...initial, pieces: [{ ...initial.pieces[0], square: { file: 0, rank: 8 } }] };
 const task = { id: 'fixture', replay_mode: 'actual', rules_enabled: true, initial_position: initial,
+  metadata: { width: 901, height: 1001, duration_s: 5, codec: 'h264' },
   start_s: 0, end_s: 5, confirmed_prefix_length: 3, moves: [
     { index: 1, move: null, status: 'corrected', change_type: 'setup', position_after: saved, video_end_s: 1, candidates: [], evidence_ids: [] },
     { index: 2, move: null, status: 'corrected', change_type: 'review', position_after: saved, video_end_s: 2, candidates: [], evidence_ids: [] },
@@ -25,7 +26,7 @@ it('步骤列表隐藏忽略记录，显示连续的两手编号', () => {
   expect((html.match(/class="move-row/g) ?? []).length).toBe(2);
   expect(html).not.toContain('不计入走棋');
   expect(html).toContain('>02</span>');
-  expect(html).not.toContain('>03</span>');
+  expect(html).not.toContain('class="move-index">03</span>');
 });
 
 it('单步编辑提供局面校正入口和点击移动，不显示坐标输入或连续补录', () => {

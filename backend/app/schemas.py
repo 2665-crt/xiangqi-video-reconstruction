@@ -68,16 +68,37 @@ class PieceEdit(Model):
     square: Square | None = None
 
 
+class BoardCheck(Model):
+    status: Literal['verified', 'partial', 'conflict']
+    visible_before: int
+    visible_after: int
+    before_mismatches: list[Square] = Field(default_factory=list)
+    after_mismatches: list[Square] = Field(default_factory=list)
+    unknown_before: list[Square] = Field(default_factory=list)
+    unknown_after: list[Square] = Field(default_factory=list)
+    reason: str = ''
+    backfilled: bool = False
+
+
 class MoveRecord(Model):
     index: int = Field(ge=1)
     move: Move | None = None
     video_start_s: float
     video_end_s: float
+    action_start_s: float | None = Field(default=None, ge=0)
+    action_end_s: float | None = Field(default=None, ge=0)
+    timing_status: Literal['legacy', 'observed', 'uncertain'] = 'legacy'
     status: Literal["auto_verified", "needs_review", "corrected", "tentative"]
     evidence_ids: list[str] = Field(default_factory=list)
+    evidence_times_s: list[float | None] = Field(default_factory=list)
+    board_check: BoardCheck | None = None
     position_after: Position | None = None
     position_before: Position | None = None
+    tracking_anchor: Position | None = None
+    tracking_anchor_s: float | None = Field(default=None, ge=0)
     observed_positions: list[Position] = Field(default_factory=list)
+    review_changed_piece_ids: list[str] = Field(default_factory=list)
+    review_witness_ids: list[str] = Field(default_factory=list)
     candidates: list[Move] = Field(default_factory=list)
     reason: str = ""
     inference_group: str | None = None
@@ -92,6 +113,12 @@ class MoveRecord(Model):
 
 class AnalysisStats(Model):
     scanned_frames: int = 0
+    backfill_intervals: int | None = None
+    backfill_frames: int = 0
+    backfill_seconds: float = 0
+    reanchor_checks: int = 0
+    reanchors: int = 0
+    reanchor_seconds: float = 0
     stable_events: int = 0
     uncertain_events: int = 0
     model_requests: int = 0
@@ -138,6 +165,27 @@ class RecoveryState(Model):
     request_started_at: float | None = None
 
 
+class RecheckState(Model):
+    id: str
+    status: Literal['running', 'ready', 'needs_review', 'applied', 'cancelled', 'failed'] = 'running'
+    left_index: int
+    right_index: int
+    start_s: float
+    end_s: float
+    processed_s: float
+    scanned_frames: int = 0
+    records: list[MoveRecord] = Field(default_factory=list)
+    endpoint_matches: bool | None = None
+    unresolved: int = 0
+    added: int = 0
+    changed: int = 0
+    removed: int = 0
+    manual_conflicts: list[int] = Field(default_factory=list)
+    integrated: bool = False
+    integrated_count: int = 0
+    message: str = '正在逐帧核对所选区间'
+
+
 class Task(Model):
     id: str
     filename: str
@@ -147,6 +195,7 @@ class Task(Model):
     metadata: VideoMetadata
     start_s: float = 0
     end_s: float
+    evidence_end_s: float | None = None
     calibration: Calibration | None = None
     calibration_confirmed: bool = False
     initial_position: Position | None = None
@@ -175,8 +224,12 @@ class Task(Model):
     recognition_events: int = 0
     pending_event_count: int = 0
     resume_video_s: float | None = None
+    resume_calibration: Calibration | None = None
+    resume_motion_active: bool = False
+    resume_motion_reference_s: float | None = None
     rebuild_video_s: float | None = None
     rebuild_target_s: float | None = None
+    recheck: RecheckState | None = None
 
 
 class InitialRecognitionRequest(Model):
@@ -202,12 +255,31 @@ class CorrectionRequest(Model):
     moves: list[Move] | None = Field(default=None, max_length=64)
     video_time_s: float | None = Field(default=None, ge=0)
     position: Position | None = None
+    action_start_s: float | None = Field(default=None, ge=0)
 
     @model_validator(mode="after")
     def one_correction_format(self):
         if sum(value is not None for value in (self.move, self.moves, self.position)) != 1:
             raise ValueError("请选择单步、区间或完整局面校正")
         return self
+
+
+class InsertRequest(Model):
+    revision: int
+    move: Move
+    video_time_s: float = Field(ge=0)
+    action_start_s: float | None = Field(default=None, ge=0)
+
+
+class RecheckRequest(Model):
+    revision: int
+    first_index: int = Field(ge=1)
+    second_index: int = Field(ge=1)
+
+
+class RecheckActionRequest(Model):
+    revision: int
+    recheck_id: str
 
 
 def opening_position() -> Position:

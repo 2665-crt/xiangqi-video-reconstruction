@@ -6,7 +6,7 @@ from contextlib import closing
 from pathlib import Path
 from uuid import uuid4
 
-from .schemas import Task, VideoMetadata
+from .schemas import RecoveryState, Task, VideoMetadata
 
 
 class RevisionConflict(ValueError):
@@ -69,7 +69,11 @@ class TaskStore:
                         or latest.recovery.generation != task.recovery.generation
                         or latest.recovery.lease_token != task.recovery.lease_token):
                     raise RecoveryCancelled('当前分析已停止或任务版本已改变')
-            saved = task.model_copy(deep=True)
+            saved = task.model_copy(update={
+                'moves': list(task.moves),
+                'analysis_stats': task.analysis_stats.model_copy(),
+                'run_stats': task.run_stats.model_copy() if task.run_stats is not None else None,
+            })
             if task.recovery is not None:
                 saved.recovery = latest.recovery.model_copy(deep=True)
                 saved.recovery.heartbeat_at = time()
@@ -95,11 +99,47 @@ class TaskStore:
                 if r.status not in ('auto_verified', 'corrected')), len(saved.moves))
             if saved.status in ('ready', 'needs_review') and saved.initial_position is not None:
                 saved.status = 'needs_review' if any(r.status not in ('auto_verified', 'corrected') for r in saved.moves) else 'ready'
-                saved.stage = '校正已保存，规则问题仅提示' if corrected is not None else ('仅需审核标记步骤，后续清晰步骤已独立校验' if saved.status == 'needs_review' else '合法棋谱已保存，可回放')
+                saved.stage = '校正已保存，规则问题仅提示' if corrected is not None else ('仍有未确定的视频区间，完整棋谱尚未确认' if saved.status == 'needs_review' else '合法棋谱已保存，可回放')
             saved.revision = latest.revision + 1
+            payload = saved.model_dump_json(by_alias=True)
             con.execute('UPDATE tasks SET revision=?,payload=? WHERE id=?',
-                        (saved.revision, saved.model_dump_json(by_alias=True), saved.id))
-        return saved
+                        (saved.revision, payload, saved.id))
+        return Task.model_validate_json(payload)
+
+    def save_progress(self, task: Task) -> Task:
+        fields = ('processed_video_s', 'stage', 'scan_progress_s', 'scan_complete', 'scan_events',
+                  'recognition_video_s', 'recognition_events', 'pending_event_count', 'evidence_end_s', 'usage')
+        with closing(sqlite3.connect(self.db)) as con, con:
+            con.execute('BEGIN IMMEDIATE')
+            row = con.execute("SELECT revision, json_extract(payload, '$.status'), json_extract(payload, '$.recovery') FROM tasks WHERE id=?", (task.id,)).fetchone()
+            if row is None:
+                raise KeyError(task.id)
+            recovery = RecoveryState.model_validate_json(row[2]) if row[2] is not None else None
+            if (row[1] not in ('analyzing', 'uploaded') or task.recovery is None and recovery is not None or task.recovery is not None and (
+                    recovery is None or not recovery.auto_run or recovery.generation != task.recovery.generation
+                    or recovery.lease_token != task.recovery.lease_token)):
+                raise RecoveryCancelled('当前分析已停止或任务版本已改变')
+            stats = task.analysis_stats.model_copy()
+            run_stats = task.run_stats.model_copy() if task.run_stats is not None else None
+            if task.recovery is not None:
+                recovery.heartbeat_at = time()
+                stats.model_requests = max(stats.model_requests, recovery.total_requests)
+                stats.images_sent = max(stats.images_sent, recovery.total_images)
+                if run_stats is not None:
+                    run_stats.model_requests = max(run_stats.model_requests, recovery.total_requests - recovery.initial_requests)
+                    run_stats.images_sent = max(run_stats.images_sent, recovery.total_images - recovery.initial_images)
+            patch = {field: getattr(task, field) for field in fields}
+            patch.update(revision=row[0] + 1, analysis_stats=stats.model_dump(mode='json'),
+                         run_stats=run_stats.model_dump(mode='json') if run_stats is not None else None,
+                         pending_turn=task.pending_turn.model_dump(mode='json', by_alias=True) if task.pending_turn is not None else None,
+                         confirmed_prefix_length=task.confirmed_prefix_length)
+            if task.recovery is not None:
+                patch['recovery'] = recovery.model_dump(mode='json')
+            expressions = ','.join(f"'$.{field}',json(?)" for field in patch)
+            con.execute(f'UPDATE tasks SET revision=?,payload=json_set(payload,{expressions}) WHERE id=?',
+                        [patch['revision'], *(json.dumps(value, ensure_ascii=False) for value in patch.values()), task.id])
+        return task.model_copy(update={'revision': patch['revision'], 'recovery': recovery,
+                                       'analysis_stats': stats, 'run_stats': run_stats})
 
     def update_recovery(self, task_id, generation, lease_token, update):
         with closing(sqlite3.connect(self.db)) as con, con:
@@ -109,6 +149,19 @@ class TaskStore:
             if (task.recovery is None or not task.recovery.auto_run or task.recovery.generation != generation
                     or task.recovery.lease_token != lease_token):
                 raise RecoveryCancelled('当前分析已停止或任务版本已改变')
+            update(task)
+            task.revision += 1
+            con.execute('UPDATE tasks SET revision=?,payload=? WHERE id=?',
+                        (task.revision, task.model_dump_json(by_alias=True), task.id))
+        return task
+
+    def update_recheck(self, task_id, job_id, update):
+        with closing(sqlite3.connect(self.db)) as con, con:
+            con.execute('BEGIN IMMEDIATE')
+            row = con.execute('SELECT payload FROM tasks WHERE id=?', (task_id,)).fetchone()
+            task = Task.model_validate_json(row[0])
+            if task.recheck is None or task.recheck.id != job_id or task.recheck.status != 'running':
+                raise RevisionConflict('区域重检已停止或任务已改变')
             update(task)
             task.revision += 1
             con.execute('UPDATE tasks SET revision=?,payload=? WHERE id=?',
@@ -135,6 +188,10 @@ class TaskStore:
 
     def recover_interrupted(self):
         for task in self.list_tasks():
+            if task.recheck is not None and task.recheck.status == 'running':
+                task.recheck.status = 'cancelled'
+                task.recheck.message = '后台重启，区域重检已中断；原棋谱与候选证据保留，可重新选择区间'
+                task = self.save(task, task.revision)
             if task.status == "analyzing":
                 if task.recovery is not None and task.recovery.auto_run:
                     task.status, task.stage, task.error = 'waiting_service', '后台重启，正在自动恢复保存的任务', None

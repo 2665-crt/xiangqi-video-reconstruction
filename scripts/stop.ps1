@@ -15,7 +15,7 @@ foreach ($serviceName in @('backend', 'frontend')) {
     $commandInfo = Get-CimInstance Win32_Process -Filter "ProcessId = $recordedId"
     if (-not $recordedTicks -or $serviceProcess.StartTime.Ticks -ne $recordedTicks) { throw '进程创建时间不符，停止操作；不会关闭其他项目。' }
     if ($serviceName -eq 'backend') {
-        if ($commandInfo.ExecutablePath -ne (Join-Path $projectRoot '.venv\Scripts\python.exe') -or $commandInfo.CommandLine -notlike '*uvicorn app.main:app*--port 8278*') { throw '后端进程身份不符，停止操作。' }
+        if ($commandInfo.ExecutablePath -ne (Join-Path $projectRoot 'output\github-recognition-study\.venv\Scripts\python.exe') -or $commandInfo.CommandLine -notlike '*uvicorn app.main:app*--port 8278*') { throw '后端进程身份不符，停止操作。' }
         $verifiedProcesses += Get-CimInstance Win32_Process -Filter "ParentProcessId = $recordedId" | Where-Object { $_.CommandLine -like '*uvicorn app.main:app*--port 8278*' } | ForEach-Object { $_.ProcessId }
     } elseif ($commandInfo.CommandLine -notlike '*node_modules/vite/bin/vite.js*--port 5278*--strictPort*') { throw '前端进程身份不符，停止操作。' }
     $verifiedProcesses += $recordedId

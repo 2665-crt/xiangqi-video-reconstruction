@@ -171,15 +171,21 @@ class VisionClient:
         self.progress = None
         from .piece_classifier import local_piece_classifier
         self.local_classifier = local_piece_classifier() if model is None and client is None else None
+        if os.getenv('VISION_FUSION') == '1' and model is None and client is None:
+            from .fusion import local_fusion_classifier
+            self.local_classifier = local_fusion_classifier()
 
     @property
     def configured(self):
         return bool(self.local_classifier or (self.base_url and self.key and self.model))
 
     def recognize_position(self, images: list[np.ndarray], reference: Position | None = None, actual: bool = False) -> list[Position]:
-        if reference is None and self.local_classifier is not None:
+        if self.local_classifier is not None and (reference is None or getattr(self.local_classifier, 'supports_reference', False)):
             self.last_request_count = self.last_image_count = 0
-            result = self.local_classifier.recognize_position(images, actual=actual)
+            options = {'actual': actual}
+            if reference is not None:
+                options['reference'] = reference
+            result = self.local_classifier.recognize_position(images, **options)
             self.last_response = self.local_classifier.last_response
             return result
         self.last_request_count = 1

@@ -224,7 +224,7 @@ def test_unrecognized_complete_snapshot_does_not_disappear_after_later_clear_boa
     initial = opening_position()
     middle = relocated(initial, [('red_cannon_1', 3, 5)])
     after = relocated(middle, [('black_horse_1', 2, 4)])
-    monkeypatch.setattr(actual, 'actual_events', lambda *args: iter([
+    monkeypatch.setattr(actual, 'actual_events', lambda *args, **kwargs: iter([
         VideoEvent(0, [board_image(initial)], position=initial),
         VideoEvent(1, [board_image(initial), board_image(middle)]),
         VideoEvent(2, [board_image(middle), board_image(after)], position=after)]))
@@ -236,8 +236,9 @@ def test_unrecognized_complete_snapshot_does_not_disappear_after_later_clear_boa
     analyze_task(task.id, store, None)
     result = store.get(task.id)
     assert result.status == 'needs_review'
-    assert [r.status for r in result.moves] == ['needs_review', 'auto_verified']
-    assert result.moves[1].position_after is not None
+    assert [r.status for r in result.moves] == ['needs_review']
+    assert result.moves[0].position_after is None
+    assert result.moves[0].board_check.status == 'conflict'
 
 
 def test_same_color_same_occupancy_glyph_change_still_reaches_model():
@@ -503,7 +504,7 @@ def test_unknown_completed_change_returning_to_original_stays_reviewable(tmp_pat
     from app.analysis import VideoEvent, analyze_task
     initial = opening_position()
     changed = relocated(initial, [('red_cannon_1', 3, 5)])
-    monkeypatch.setattr(actual, 'actual_events', lambda *args: iter([
+    monkeypatch.setattr(actual, 'actual_events', lambda *args, **kwargs: iter([
         VideoEvent(0, [board_image(initial)], position=initial),
         VideoEvent(1, [board_image(changed)]),
         VideoEvent(2, [board_image(initial)], position=initial)]))

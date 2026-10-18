@@ -120,8 +120,10 @@ def test_network_wait_preserves_records_and_resumed_replay_matches_baseline(tmp_
     initial = task.initial_position
     first = apply_move(initial, next(m for m in legal_moves(initial) if m.piece_id == 'red_pawn_4'))
     second = apply_move(first, next(m for m in legal_moves(first) if m.piece_id == 'black_pawn_4'))
-    frames = [np.zeros((100, 100, 3), np.uint8), np.full((100, 100, 3), 50, np.uint8)]
-    monkeypatch.setattr(actual, 'actual_events', lambda *a, **k: iter([VideoEvent(1, [frames[0]], position=first), VideoEvent(2, [frames[1]])]))
+    from test_tracking import board_image
+    frames = [board_image(initial), board_image(first), board_image(second)]
+    monkeypatch.setattr(actual, 'actual_events', lambda *a, **k: iter([
+        VideoEvent(1, [board_image(a[1]), frames[1]], position=first), VideoEvent(2, frames[1:])]))
     monkeypatch.setattr(actual, 'verified_observed_candidates', lambda ref, positions, *images: positions)
     calls = []
     def transport(request):

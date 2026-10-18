@@ -95,7 +95,10 @@ def test_missing_piece_in_retained_move_is_warned_without_restoring_deleted_piec
     assert not any(p.id == 'black_rook_0' for p in fixed.moves[1].position_after.pieces)
     assert fixed.moves[1].move.piece_id == 'black_rook_0'
     assert fixed.moves[1].violation_note
-    assert len(build_recording_playlist(fixed, 1)['records']) == 2
+    from app.records import movement_records
+    assert len(fixed.moves) == 2
+    assert movement_records(fixed) == []
+    assert len(build_recording_playlist(fixed, 1)['records']) == 1
 
 
 def test_worker_save_cannot_restore_old_suffix_after_manual_correction(tmp_path):

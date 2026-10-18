@@ -1,4 +1,4 @@
-import { useRef, type RefObject } from 'react';
+import { useRef, useState, type RefObject } from 'react';
 import type { Calibration, Task } from '../types';
 import { timeText } from '../types';
 import { gridPoint } from '../calibration';
@@ -13,6 +13,8 @@ export function VideoPanel({ task, videoRef, editing, calibration, setCalibratio
   const input = useRef<HTMLInputElement>(null);
   const svg = useRef<SVGSVGElement>(null);
   const drag = useRef<number | null>(null);
+  const dragDepth = useRef(0);
+  const [dragging, setDragging] = useState(false);
   function updatePoint(clientX: number, clientY: number) {
     if (!task || !calibration || drag.current === null || !svg.current) return;
     const box = svg.current.getBoundingClientRect();
@@ -22,7 +24,11 @@ export function VideoPanel({ task, videoRef, editing, calibration, setCalibratio
   }
   return <>
     <input ref={input} type="file" accept="video/mp4,.mp4" className="hidden-input" aria-label="上传录屏视频" disabled={busy} onChange={e => { const file = e.target.files?.[0]; if (file) onUpload(file); e.target.value = ''; }} />
-    {!task ? <button className="upload-zone" disabled={busy} onClick={() => input.current?.click()} onDragOver={e => e.preventDefault()} onDrop={e => { e.preventDefault(); const file = e.dataTransfer.files[0]; if (file && !busy) onUpload(file); }}>
+    {!task ? <button className={`upload-zone ${dragging && !busy ? 'dragging' : ''}`} disabled={busy} aria-busy={busy} onClick={() => input.current?.click()}
+      onDragOver={e => { e.preventDefault(); e.dataTransfer.dropEffect = busy ? 'none' : 'copy'; }}
+      onDragEnter={e => { e.preventDefault(); dragDepth.current++; if (!busy) setDragging(true); }}
+      onDragLeave={() => { dragDepth.current = Math.max(0, dragDepth.current - 1); if (!dragDepth.current) setDragging(false); }}
+      onDrop={e => { e.preventDefault(); dragDepth.current = 0; setDragging(false); const file = e.dataTransfer.files[0]; if (file && !busy) onUpload(file); }}>
       <span className="upload-symbol"><svg width="31" height="31" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.4"><path d="M12 16V3m-5 5 5-5 5 5M4 14v6h16v-6" /></svg></span>
       <strong>{busy ? '正在上传与检查视频…' : '上传你的象棋录屏'}</strong><span>拖入视频，或点击选择文件</span><small>MP4 · 固定视角 · 棋盘完整可见 · 最大 2 GiB</small>
     </button> : <>

@@ -1,5 +1,14 @@
 import cv2
 import numpy as np
+from functools import lru_cache
+
+
+@lru_cache(maxsize=4)
+def _pixel_grid(height, width):
+    yy, xx = np.mgrid[:height, :width]
+    yy.setflags(write=False)
+    xx.setflags(write=False)
+    return yy, xx
 
 
 def board_geometry(image):
@@ -8,18 +17,18 @@ def board_geometry(image):
     return cell, (width - 8 * cell - 1) / 2
 
 
-def observe_initial_board(image):
+def observe_initial_board(image, cells=None):
     from .analysis import read_board_cells
     cell, margin = board_geometry(image)
     inset = max(0, round(margin - cell / 2))
     compact = image[inset:image.shape[0] - inset, inset:image.shape[1] - inset] if inset else image
-    cells = read_board_cells(compact, strict=True)
+    cells = read_board_cells(compact, strict=True) if cells is None else dict(cells)
     scale = 50 / cell
     small = cv2.resize(image, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
     gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
     hsv = cv2.cvtColor(small, cv2.COLOR_BGR2HSV)
     edges = cv2.Canny(gray, 50, 120)
-    yy, xx = np.mgrid[:small.shape[0], :small.shape[1]]
+    yy, xx = _pixel_grid(*small.shape[:2])
     neutral_pixels = (hsv[:, :, 1] < 85) & (hsv[:, :, 2] > 100)
     occupied = {square for square, color in cells.items() if color is not None}
     origin = margin * scale
@@ -39,7 +48,7 @@ def observe_initial_board(image):
     faces, quality = {}, {}
     if circles is None:
         return cells, faces
-    angles = np.linspace(0, 2 * np.pi, 96, endpoint=False)
+    from .numerical import circle_support
     for cx, cy, radius in circles[0]:
         file = round((float(cx) - origin) / 50)
         rank = round((float(cy) - origin) / 50)
@@ -51,12 +60,7 @@ def observe_initial_board(image):
         top, bottom = max(0, int(cy) - extent), min(small.shape[0], int(cy) + extent + 1)
         inner = (xx[top:bottom, left:right] - cx) ** 2 + (yy[top:bottom, left:right] - cy) ** 2 < (radius * .72) ** 2
         neutral = float(neutral_pixels[top:bottom, left:right][inner].mean())
-        support = np.zeros(len(angles), bool)
-        for delta in (-2, -1, 0, 1, 2):
-            xs = np.clip(np.rint(cx + (radius + delta) * np.cos(angles)).astype(int), 0, small.shape[1] - 1)
-            ys = np.clip(np.rint(cy + (radius + delta) * np.sin(angles)).astype(int), 0, small.shape[0] - 1)
-            support |= edges[ys, xs] > 0
-        boundary = float(support.mean())
+        boundary = circle_support(edges, cx, cy, radius)
         if boundary < .5 or (neutral < .42 and boundary < .8):
             continue
         score = boundary + neutral - abs(dx) / 100 - abs(dy) / 150

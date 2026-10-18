@@ -1,10 +1,10 @@
 ﻿$ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
-$pythonExe = Join-Path $projectRoot '.venv\Scripts\python.exe'
+$pythonExe = Join-Path $projectRoot 'output\github-recognition-study\.venv\Scripts\python.exe'
 $frontendRoot = Join-Path $projectRoot 'frontend'
 $nodeExe = (Get-Command node.exe -ErrorAction Stop).Source
 
-if (-not (Test-Path -LiteralPath $pythonExe)) { throw '缺少 .venv，请先按 README 安装项目依赖。' }
+if (-not (Test-Path -LiteralPath $pythonExe)) { throw '缺少本地融合运行环境，请先按 README 安装项目依赖。' }
 if (-not (Test-Path -LiteralPath (Join-Path $frontendRoot 'node_modules\vite\bin\vite.js'))) { throw '缺少前端依赖，请先在 frontend 中执行 npm.cmd install。' }
 
 foreach ($projectPort in @(5278, 8278)) {
@@ -14,6 +14,8 @@ foreach ($projectPort in @(5278, 8278)) {
     finally { $probe.Stop() }
 }
 
+$env:PYTHONPATH = Join-Path $projectRoot '.venv\Lib\site-packages'
+$env:VISION_FUSION = '1'
 $logRoot = Join-Path $projectRoot 'data\logs'
 New-Item -ItemType Directory -Force -Path $logRoot | Out-Null
 $backendProcess = Start-Process -FilePath $pythonExe -ArgumentList @('-m', 'uvicorn', 'app.main:app', '--app-dir', 'backend', '--host', '127.0.0.1', '--port', '8278') -WorkingDirectory $projectRoot -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $logRoot 'backend.log') -RedirectStandardError (Join-Path $logRoot 'backend-error.log')

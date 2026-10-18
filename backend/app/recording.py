@@ -24,24 +24,29 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 def build_recording_playlist(task: Task, interval_s: int) -> dict:
     if interval_s not in (1, 2, 3):
         raise ValueError('请选择 1、2 或 3 秒每手')
-    if task.status in ('analyzing', 'waiting_service', 'action_required') or task.pending_turn is not None:
-        raise ValueError('请等待分析结束并确认全部步骤后再导出')
     if task.initial_position is None:
         raise ValueError('请先确认并保存初始棋局')
-    if task.processed_video_s + .001 < task.end_s:
-        raise ValueError('所选区间尚未完整分析，请完成分析后再导出')
-    unresolved = [r.index for r in task.moves if r.status not in ('auto_verified', 'corrected')]
-    if unresolved:
-        raise ValueError('请先校正第 ' + '、'.join(map(str, unresolved)) + ' 步，再导出完整录像')
+    from .records import movement_records
+    from .turns import unchecked_move
+    movements = movement_records(task)
     records = []
+    current = task.initial_position
     for record in task.moves:
-        if not task.start_s <= record.video_end_s <= task.end_s:
-            raise ValueError(f'第 {record.index} 步时间不在已保存选区内，请先校正')
-        if record.change_type == 'review' and record.move is None:
+        if record not in movements and not (record.change_type == 'setup' and record.manual_override):
             continue
-        if record.position_after is None:
-            raise ValueError(f'第 {record.index} 步缺少确认局面，请先校正')
-        records.append(record.model_dump(by_alias=True))
+        saved = record.model_copy(deep=True)
+        if saved.move is None and len(saved.candidates) == 1 and saved.board_check is not None and saved.board_check.status in ('verified', 'partial'):
+            saved.move = saved.candidates[0].model_copy(deep=True)
+        if saved.position_after is None and saved.move is not None:
+            # 仅补全导出副本，待校正走法不因此变成已确认记录。
+            saved.position_before = current.model_copy(deep=True)
+            saved.position_after, _ = unchecked_move(current, saved.move)
+        if saved.position_after is None:
+            continue
+        current = saved.position_after
+        records.append(saved.model_dump(by_alias=True))
+    if not records:
+        raise ValueError('暂无可导出的对局步骤')
     duration = (len(records) + 1) * interval_s
     return {'initial_position': task.initial_position.model_dump(by_alias=True), 'records': records,
             'interval_s': interval_s, 'duration_s': duration, 'total_frames': duration * 60}

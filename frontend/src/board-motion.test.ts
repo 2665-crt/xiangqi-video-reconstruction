@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { planBoardTransition } from './components/Board';
-import type { Position } from './types';
+import { displayStep } from './replay';
+import type { Position, Task } from './types';
 
 const before: Position = { side_to_move: 'red', pieces: [
   { id: 'r', color: 'red', kind: 'rook', square: { file: 0, rank: 9 } },
@@ -23,6 +24,18 @@ describe('虚拟棋盘动画', () => {
     expect(transition.type).toBe('move');
     expect(transition.moved[0].after.square).toEqual({ file: 0, rank: 9 });
     expect(transition.added.map(p => p.id)).toEqual(['p']);
+  });
+  it.each([1, 2])('相邻可见走棋间有 %i 条隐藏疑点时仍播放移动及反向吃子动画', hidden => {
+    const action = { piece_id:'r', color:'red', from:before.pieces[0].square, to:after.pieces[0].square };
+    const task = { initial_position:before, moves:[
+      { index:1, status:'auto_verified', move:{ ...action, from:{file:0,rank:8}, to:before.pieces[0].square }, position_before:{ ...before, pieces:[{ ...before.pieces[0], square:{file:0,rank:8} },before.pieces[1]] }, position_after:before },
+      ...Array.from({length:hidden}, (_,i) => ({index:i+2,status:'needs_review',change_type:'review',move:null,candidates:[]})),
+      { index:hidden+2, status:'auto_verified', move:action, position_before:before, position_after:after },
+    ] } as unknown as Task;
+    const delta = displayStep(task, hidden+2)-displayStep(task, 1);
+    expect(delta).toBe(1);
+    expect(planBoardTransition(before,after,delta).type).toBe('move');
+    expect(planBoardTransition(after,before,-delta).type).toBe('move');
   });
   it('跨多步即使只剩一枚棋子的位置不同，也使用局面过渡', () => {
     expect(planBoardTransition(before, after, 5).type).toBe('replace');

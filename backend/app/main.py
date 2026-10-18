@@ -13,7 +13,7 @@ from fastapi import FastAPI, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse, Response
 
 from .calibration import detect_calibration, rectify_board, validate_calibration, refine_calibration
-from .schemas import CorrectionRequest, InitialPieceReview, InitialRecognitionRequest, Position, RecordingRequest, SetupRequest, Task
+from .schemas import CorrectionRequest, InitialPieceReview, InitialRecognitionRequest, InsertRequest, Position, RecordingRequest, RecheckActionRequest, RecheckRequest, RecheckState, SetupRequest, Task
 from .recording import RecordingManager
 from .analysis import analyze_task, correct_interval, revalidate_suffix
 from .vision import VisionClient
@@ -40,7 +40,9 @@ def create_app(data_root: Path | None = None, recording_root: Path | None = None
     store = TaskStore(data_root or PROJECT_ROOT / "data")
     recordings = RecordingManager(store.root / 'recordings', recording_root or PROJECT_ROOT / '录屏存放')
     workers = {}
+    recheck_threads = {}
     analysis_lock = threading.Lock()
+    vision_runtime_lock = threading.Lock()
 
     def stop_worker(task_id, manual=True):
         task = store.get(task_id)
@@ -75,7 +77,7 @@ def create_app(data_root: Path | None = None, recording_root: Path | None = None
     def launch_recovery(task):
         process = multiprocessing.get_context('spawn').Process(target=run_analysis_worker,
             args=(task.id, str(store.root), task.recovery.local_only),
-            kwargs={'generation': task.recovery.generation, 'lease_token': task.recovery.lease_token}, daemon=True)
+            kwargs={'generation': task.recovery.generation, 'lease_token': task.recovery.lease_token}, daemon=False)
         process.start()
         return process
 
@@ -86,6 +88,11 @@ def create_app(data_root: Path | None = None, recording_root: Path | None = None
         store.recover_interrupted()
         recovery.start()
         yield
+        for task_id in list(recheck_threads):
+            current = store.get(task_id)
+            if current.recheck is not None and current.recheck.status == 'running':
+                current.recheck.status, current.recheck.message = 'cancelled', '后台已关闭；候选与原棋谱保留，可重新选择区间检测'
+                store.save(current, current.revision)
         recovery.close()
         for task_id in list(workers):
             stop_worker(task_id, manual=False)
@@ -109,15 +116,32 @@ def create_app(data_root: Path | None = None, recording_root: Path | None = None
         except RevisionConflict:
             raise HTTPException(409, "任务已更新，请刷新后重试")
 
+    def require_editable(task):
+        if task.recheck is not None and task.recheck.status == 'running':
+            raise HTTPException(409, '请先停止区域重检，再修改棋谱或分析设置')
+
+    def require_vision_runtime():
+        if os.getenv('VISION_FUSION') == '1':
+            try:
+                from .fusion import local_fusion_classifier
+                with vision_runtime_lock:
+                    local_fusion_classifier()
+            except ModuleNotFoundError as exc:
+                raise HTTPException(503, f'本地融合识别环境缺少 {exc.name}，请使用 scripts/start-fusion.ps1 启动完整识别环境。') from None
+
     @app.get("/api/health")
     def health():
-        return {"status": "ok", "vision_configured": all(os.getenv(name) for name in ("VISION_API_BASE", "VISION_MODEL", "VISION_API_KEY"))}
+        try:
+            require_vision_runtime()
+        except HTTPException as exc:
+            return {'status': 'error', 'vision_configured': False, 'detail': exc.detail}
+        return {"status": "ok", "vision_configured": os.getenv('VISION_FUSION') == '1' or all(os.getenv(name) for name in ("VISION_API_BASE", "VISION_MODEL", "VISION_API_KEY"))}
 
     @app.get("/api/tasks")
     def list_tasks():
+        from .records import movement_records
         return [{"id": t.id, "filename": t.filename, "status": t.status,
-                 "steps": sum(not (r.status == 'corrected' and r.change_type == 'review' and r.move is None)
-                              for r in t.moves)} for t in store.list_tasks()]
+                 "steps": len(movement_records(t))} for t in store.list_tasks()]
 
     @app.post("/api/tasks", status_code=201, response_model=Task)
     async def upload(file: UploadFile):
@@ -173,7 +197,7 @@ def create_app(data_root: Path | None = None, recording_root: Path | None = None
                 else:
                     task.status, task.stage, task.error = "failed", "分析进程已退出", "分析进程意外退出，可以重新开始"
                     task = save_task(task, task.revision)
-            if task.rules_enabled and task.moves:
+            if task.rules_enabled and task.moves and task.status not in ('analyzing', 'waiting_service'):
                 from .turns import revalidate_turns
                 original_status, original_stage = task.status, task.stage
                 task = revalidate_turns(task)
@@ -188,7 +212,7 @@ def create_app(data_root: Path | None = None, recording_root: Path | None = None
 
     @app.post('/api/tasks/{task_id}/recordings', status_code=202)
     def export_recording(task_id: str, request: RecordingRequest):
-        task = task_detail(task_id)
+        task = get_task(task_id)
         try:
             return recordings.start(task, request.revision, request.interval_s)
         except RevisionConflict as exc:
@@ -245,6 +269,7 @@ def create_app(data_root: Path | None = None, recording_root: Path | None = None
     @app.patch("/api/tasks/{task_id}/setup", response_model=Task)
     def setup(task_id: str, request: SetupRequest):
         task = get_task(task_id)
+        require_editable(task)
         if task.status == "analyzing" or (task.recovery is not None and task.recovery.auto_run):
             raise HTTPException(409, "请先停止分析或自动恢复，再修改设置")
         if not 0 <= request.start_s < request.end_s <= task.metadata.duration_s:
@@ -260,6 +285,7 @@ def create_app(data_root: Path | None = None, recording_root: Path | None = None
         if changed_range:
             task.moves, task.confirmed_prefix_length = [], 0
             task.pending_turn = None
+            task.evidence_end_s = None
             task.processed_video_s = task.start_s
             task.initial_position = request.initial_position
             task.context_position = None
@@ -287,10 +313,12 @@ def create_app(data_root: Path | None = None, recording_root: Path | None = None
     @app.post("/api/tasks/{task_id}/recognize-initial", response_model=Task)
     def recognize_initial(task_id: str, request: InitialRecognitionRequest):
         task = get_task(task_id)
+        require_editable(task)
         if task.revision != request.revision:
             raise HTTPException(409, "任务已更新，请刷新后重试")
         if not task.calibration:
             raise HTTPException(422, "请先定位棋盘四角并保存设置")
+        require_vision_runtime()
         vision = VisionClient()
         if not vision.configured:
             vision.close()
@@ -316,6 +344,7 @@ def create_app(data_root: Path | None = None, recording_root: Path | None = None
 
     @app.post('/api/tasks/{task_id}/resume', response_model=Task)
     def resume(task_id: str, request: InitialRecognitionRequest):
+        require_editable(get_task(task_id))
         get_task(task_id)
         try:
             return recovery.request_resume(task_id, request.revision)
@@ -325,8 +354,11 @@ def create_app(data_root: Path | None = None, recording_root: Path | None = None
     @app.post("/api/tasks/{task_id}/analyze", status_code=202, response_model=Task)
     def analyze(task_id: str, local_only: bool = Query(False), actual: bool = Query(True)):
         task = get_task(task_id)
+        require_editable(task)
         if task.recovery is not None and task.recovery.auto_run:
             raise HTTPException(409, '任务正在分析或自动恢复，请先停止后再重新分析')
+        if not local_only:
+            require_vision_runtime()
         vision = None if local_only else VisionClient()
         if vision is not None and not vision.configured:
             vision.close()
@@ -335,7 +367,7 @@ def create_app(data_root: Path | None = None, recording_root: Path | None = None
             if vision is not None:
                 vision.close()
             raise HTTPException(409, "请先核对并保存初始棋局，再分析视频变化")
-        if not analysis_lock.acquire(blocking=False):
+        if not analysis_lock.acquire(timeout=1):
             if vision is not None:
                 vision.close()
             raise HTTPException(409, "已有视频正在分析，请完成后再开始")
@@ -350,6 +382,7 @@ def create_app(data_root: Path | None = None, recording_root: Path | None = None
             task.rules_enabled = actual
             task.moves, task.confirmed_prefix_length = [], 0
             task.pending_turn = None
+            task.evidence_end_s = None
             task.processed_video_s = task.start_s
             task.recognition_video_s = task.start_s
             task.recognition_events = 0
@@ -358,7 +391,7 @@ def create_app(data_root: Path | None = None, recording_root: Path | None = None
             saved = prepare_recovery(task, store, local_only=local_only)
             process = multiprocessing.get_context("spawn").Process(target=run_analysis_worker,
                 args=(task_id, str(store.root), local_only),
-                kwargs={'generation': saved.recovery.generation, 'lease_token': saved.recovery.lease_token}, daemon=True)
+                kwargs={'generation': saved.recovery.generation, 'lease_token': saved.recovery.lease_token}, daemon=False)
             try:
                 process.start()
             except Exception:
@@ -383,6 +416,7 @@ def create_app(data_root: Path | None = None, recording_root: Path | None = None
     @app.patch("/api/tasks/{task_id}/moves/{index}", response_model=Task)
     def correction(task_id: str, index: int, request: CorrectionRequest):
         task = get_task(task_id)
+        require_editable(task)
         if task.recovery is not None and task.recovery.auto_run:
             raise HTTPException(409, '请先停止分析或自动恢复，再校正棋局')
         if task.status == "analyzing" and not task.rules_enabled:
@@ -402,8 +436,82 @@ def create_app(data_root: Path | None = None, recording_root: Path | None = None
                     fixed = correct_interval(task, index, actions, request.video_time_s)
         except ValueError as exc:
             raise HTTPException(422, str(exc))
+        if request.action_start_s is not None:
+            record = fixed.moves[index - 1]
+            preceding = (task.moves[index - 2].action_end_s if task.moves[index - 2].action_end_s is not None else task.moves[index - 2].video_end_s) if index > 1 else task.start_s
+            if not preceding <= request.action_start_s <= record.video_end_s:
+                raise HTTPException(422, '动作开始时间必须位于前一步落定与本步落定之间')
+            record.action_start_s, record.action_end_s, record.timing_status = request.action_start_s, record.video_end_s, 'observed'
         fixed.recovery = None
+        fixed.recheck = None
         return save_task(fixed, task.revision if task.status == 'analyzing' else request.revision)
+
+    @app.post('/api/tasks/{task_id}/moves/{index}/insert', response_model=Task)
+    def insert_move(task_id: str, index: int, request: InsertRequest):
+        task = get_task(task_id)
+        require_editable(task)
+        if task.status == 'analyzing' or task.recovery is not None and task.recovery.auto_run:
+            raise HTTPException(409, '请先停止分析，再插入遗漏走棋')
+        if task.revision != request.revision:
+            raise HTTPException(409, '任务已更新，请刷新后重试')
+        try:
+            from .turns import insert_turn
+            fixed = insert_turn(task, index, request.move, request.video_time_s, request.action_start_s)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc))
+        fixed.recovery = None
+        return save_task(fixed, request.revision)
+
+    @app.post('/api/tasks/{task_id}/recheck', status_code=202, response_model=Task)
+    def start_recheck(task_id: str, request: RecheckRequest):
+        from .recheck import range_bounds, run_recheck
+        with analysis_lock:
+            task = get_task(task_id)
+            require_editable(task)
+            if task.status == 'analyzing' or task.recovery is not None and task.recovery.auto_run:
+                raise HTTPException(409, '请先停止当前分析，再选择区域重检')
+            if task.revision != request.revision:
+                raise HTTPException(409, '任务已更新，请刷新后重试')
+            if task.calibration is None or not (store.task_dir(task.id) / 'source.mp4').is_file():
+                raise HTTPException(422, '区域重检需要原视频与已保存的棋盘校准')
+            try:
+                left, right, start, end = range_bounds(task, request.first_index, request.second_index)
+            except ValueError as exc:
+                raise HTTPException(422, str(exc))
+            task.recheck = RecheckState(id=uuid4().hex, left_index=left, right_index=right,
+                                       start_s=start, end_s=end, processed_s=start)
+            saved = save_task(task, request.revision)
+            thread = threading.Thread(target=run_recheck, args=(task.id, str(store.root), saved.recheck.id), daemon=True)
+            recheck_threads[task.id] = thread
+            thread.start()
+            return saved
+
+    @app.post('/api/tasks/{task_id}/recheck/cancel', response_model=Task)
+    def cancel_recheck(task_id: str, request: RecheckActionRequest):
+        task = get_task(task_id)
+        if task.recheck is None or task.recheck.id != request.recheck_id:
+            raise HTTPException(409, '区域重检已改变，请刷新后重试')
+        def cancel(saved):
+            saved.recheck.status, saved.recheck.message = 'cancelled', '区域重检已取消，候选证据及原棋谱保留'
+        try:
+            return store.update_recheck(task_id, request.recheck_id, cancel)
+        except RevisionConflict:
+            raise HTTPException(409, '重检已经结束，请刷新查看结果')
+
+    @app.post('/api/tasks/{task_id}/recheck/apply', response_model=Task)
+    def apply_recheck(task_id: str, request: RecheckActionRequest):
+        from .recheck import archive_recheck, integrate_recheck
+        task = get_task(task_id)
+        job = task.recheck
+        if job is None or job.id != request.recheck_id or job.status not in ('ready', 'needs_review', 'applied'):
+            raise HTTPException(409, '区域重检尚未结束，请等待检测完成')
+        if job.integrated or job.status == 'applied':
+            return task
+        if task.revision != request.revision:
+            raise HTTPException(409, '任务已更新，请刷新后重试')
+        archive_recheck(task, store)
+        fixed = integrate_recheck(task)
+        return save_task(fixed, request.revision)
 
     return app
 

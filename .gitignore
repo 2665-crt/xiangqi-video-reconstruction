@@ -9,3 +9,10 @@ __pycache__/
 test-results/
 playwright-report/
 *.log
+
+/experiments/
+/output/
+/录屏存放/
+/直播录屏/
+/Ultralytics/
+*.tsbuildinfo

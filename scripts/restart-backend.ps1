@@ -7,7 +7,7 @@ if ($tasks | Where-Object { $_.status -in @('analyzing', 'waiting_service') }) {
     throw '当前有正在运行或自动恢复的任务，未重启后端。'
 }
 $parent = Get-CimInstance Win32_Process -Filter "ProcessId=$($runtime.backendPid)"
-$pythonExe = Join-Path $projectRoot '.venv\Scripts\python.exe'
+$pythonExe = Join-Path $projectRoot 'output\github-recognition-study\.venv\Scripts\python.exe'
 if ($null -eq $parent -or $parent.ExecutablePath -ne $pythonExe -or $parent.CommandLine -notmatch 'uvicorn.+app.main:app.+8278') {
     throw '运行记录与本项目后端进程不匹配，未停止任何进程。'
 }
@@ -18,6 +18,8 @@ $logs = Join-Path $projectRoot 'data\logs'
 Copy-Item -LiteralPath $runtimePath -Destination (Join-Path $logs "runtime-before-recovery-$stamp.json")
 & taskkill.exe /PID $runtime.backendPid /T /F | Out-Null
 if ($LASTEXITCODE -ne 0) { throw '本项目后端未能停止，未继续启动。' }
+$env:PYTHONPATH = Join-Path $projectRoot '.venv\Lib\site-packages'
+$env:VISION_FUSION = '1'
 $backend = Start-Process -FilePath $pythonExe -ArgumentList @('-m', 'uvicorn', 'app.main:app', '--app-dir', 'backend', '--host', '127.0.0.1', '--port', '8278') -WorkingDirectory $projectRoot -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $logs "backend-recovery-$stamp.log") -RedirectStandardError (Join-Path $logs "backend-recovery-$stamp-error.log")
 $runtime.backendPid = $backend.Id
 $runtime.backendStartTicks = $backend.StartTime.Ticks

@@ -1,5 +1,6 @@
 from collections import deque
 from itertools import chain
+from functools import lru_cache
 import json
 from typing import NamedTuple
 from time import monotonic
@@ -106,29 +107,75 @@ class VideoEvent(NamedTuple):
     moving_colors: tuple[str, ...] = ()
     last_clear_s: float | None = None
     departure_only: bool = False
+    action_start_s: float | None = None
+    image_times_s: tuple[float | None, ...] = ()
+    backfilled: bool = False
+    board_check: object | None = None
+    moving_piece_ids: tuple[str, ...] = ()
+    tracking_anchor: bool = False
 
 
-def read_board_cells(image, strict=False):
-    small = cv2.resize(image, (450, 500))
-    hsv = cv2.cvtColor(small, cv2.COLOR_BGR2HSV)
+@lru_cache(maxsize=1)
+def _cell_sampling():
     dy, dx = np.mgrid[-18:19, -18:19]
     disk = dx * dx + dy * dy < 18 * 18
     files, ranks = np.meshgrid(np.arange(9), np.arange(10))
     files, ranks = files.ravel(), ranks.ravel()
     ys, xs = 25 + ranks[:, None] * 50 + dy[disk], 25 + files[:, None] * 50 + dx[disk]
+    inward = (((files[:, None] != 0) | (dx[disk] >= 0))
+              & ((files[:, None] != 8) | (dx[disk] <= 0))
+              & ((ranks[:, None] != 0) | (dy[disk] >= 0))
+              & ((ranks[:, None] != 9) | (dy[disk] <= 0)))
+    edge = (files == 0) | (files == 8) | (ranks == 0) | (ranks == 9)
+    return files, ranks, ys, xs, inward, inward.sum(axis=1), edge
+
+
+def read_board_cells(image, strict=False):
+    from .board_colors import wood_surface_mask
+    small = cv2.resize(image, (450, 500))
+    hsv = cv2.cvtColor(small, cv2.COLOR_BGR2HSV)
+    files, ranks, ys, xs, inward, inward_count, edge = _cell_sampling()
     pixels, colors = small[ys, xs].astype(np.float32), hsv[ys, xs]
     red = ((colors[:, :, 0] > 150) | (colors[:, :, 0] < 10)) & (colors[:, :, 1] > 45) & (colors[:, :, 2] > 70)
     surface_red = red
     neutral = (pixels[:, :, 0] > pixels[:, :, 2] * .93) & (pixels.max(axis=2) > 100)
     coverage, red_ratio = (neutral | surface_red).mean(axis=1), red.mean(axis=1)
-    skin = ((colors[:, :, 0] > 3) & (colors[:, :, 0] < 20) & (colors[:, :, 1] > 65) & (colors[:, :, 2] > 95)).mean(axis=1)
+    skin_pixels = (colors[:, :, 0] > 3) & (colors[:, :, 0] < 20) & (colors[:, :, 1] > 65) & (colors[:, :, 2] > 95)
+    wood_surface = wood_surface_mask(hsv)
+    sampled_wood = wood_surface[ys, xs] if wood_surface is not None else None
+    if sampled_wood is not None:
+        skin_pixels &= ~sampled_wood
+    skin = skin_pixels.mean(axis=1)
     if strict:
         ink = (colors[:, :, 2] < 185).mean(axis=1)
-        grid_ink = (colors[:, :, 2] < np.percentile(colors[:, :, 2], 75, axis=1)[:, None] * .65).mean(axis=1)
-        wood = ((pixels[:, :, 2] > pixels[:, :, 1] * .95) & (pixels[:, :, 1] > pixels[:, :, 0] * 1.1)
-                & (colors[:, :, 2] > 80) & (colors[:, :, 1] > 30)).mean(axis=1)
+        grid_pixels = colors[:, :, 2] < np.percentile(colors[:, :, 2], 75, axis=1)[:, None] * .65
+        grid_ink = grid_pixels.mean(axis=1)
+        wood_pixels = ((pixels[:, :, 2] > pixels[:, :, 1] * .95) & (pixels[:, :, 1] > pixels[:, :, 0] * 1.1)
+                       & (colors[:, :, 2] > 80) & (colors[:, :, 1] > 30))
+        wood = wood_pixels.mean(axis=1)
+        inward_wood = (wood_pixels & inward).sum(axis=1) / inward_count
+        inward_grid = (grid_pixels & inward).sum(axis=1) / inward_count
+        inward_coverage = ((neutral | surface_red) & inward).sum(axis=1) / inward_count
+        finger_pixels = ((colors[:, :, 0] < 23) & (colors[:, :, 1] > 55) & (colors[:, :, 2] > 95)
+                         & (pixels[:, :, 2] > pixels[:, :, 1] * 1.2) & (pixels[:, :, 0] > pixels[:, :, 1] * .62))
+        if sampled_wood is not None:
+            finger_pixels &= ~sampled_wood
+        inward_fingers = (finger_pixels & inward).sum(axis=1) / inward_count
+        # 边缘圆盘会混入棋盘外背景；空格仍须在盘内区域同时看到木纹和网格。
+        edge_empty = edge & (inward_coverage <= .15) & (inward_wood >= .65) & (inward_grid >= .04) & (inward_fingers <= .18)
+        if sampled_wood is not None:
+            core = (ys[0] - 25) ** 2 + (xs[0] - 25) ** 2 < 8 ** 2
+            core_coverage = (neutral | surface_red)[:, core].mean(axis=1)
+            learned_empty = (edge & (coverage <= .3) & (sampled_wood.mean(axis=1) >= .65)
+                             & (sampled_wood[:, core].mean(axis=1) >= .8)
+                             & (core_coverage <= .05) & (inward_grid >= .02) & (inward_fingers <= .18))
+            inward_coverage[learned_empty] = core_coverage[learned_empty]
+            edge_empty |= learned_empty
+        wood[edge_empty], grid_ink[edge_empty] = inward_wood[edge_empty], inward_grid[edge_empty]
+        coverage[edge_empty] = inward_coverage[edge_empty]
         return {(int(files[i]), int(ranks[i])): ("red" if red_ratio[i] > .045 else "black") if coverage[i] >= .65 else None
-                for i in range(90) if not (.15 < coverage[i] < .65 or
+                for i in range(90) if not (edge[i] and coverage[i] < .65 and inward_fingers[i] > .18 or
+                    .15 < coverage[i] < .65 or
                     (skin[i] > (.18 if coverage[i] >= .65 else .35)
                      and not (coverage[i] <= .15 and wood[i] >= .65 and grid_ink[i] >= .04)) or
                     (coverage[i] >= .65 and red_ratio[i] <= .045 and ink[i] < .045) or
@@ -244,7 +291,7 @@ def board_changed(a, b):
     return bool(np.any(local_ratios > 0.025))
 
 
-def stable_events(frames, stable_seconds=0.18, state=None):
+def stable_events(frames, stable_seconds=0.18, state=None, finalize=True):
     state = {} if state is None else state
     pending = state.get('pending')
     pending_start = state.get('pending_start', 0)
@@ -288,9 +335,9 @@ def stable_events(frames, stable_seconds=0.18, state=None):
         state.update(pending=pending, pending_start=pending_start, emitted=emitted, images=list(images),
                      last_time=last_time, pending_emitted=pending_emitted,
                      motion_samples=list(motion_samples), motion_time=motion_time)
-    if pending is not None and not pending_emitted:
+    if finalize and pending is not None and not pending_emitted:
         remember_motion()
-    if motion_samples:
+    if finalize and motion_samples:
         yield VideoEvent(motion_time, [image for image, _ in motion_samples], True)
 
 

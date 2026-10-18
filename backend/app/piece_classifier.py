@@ -13,12 +13,17 @@ KINDS = ('king', 'rook', 'horse', 'cannon', 'advisor', 'elephant', 'pawn')
 MODEL_PATH = Path(__file__).resolve().parents[1] / 'models' / 'piece-kind-cnn-v1.onnx'
 
 
-def piece_color(image):
-    hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
-    h, w = image.shape[:2]
+@lru_cache(maxsize=64)
+def _piece_face_mask(h, w):
     yy, xx = np.mgrid[:h, :w]
     face = (xx-(w-1)/2)**2 + (yy-(h-1)/2)**2 < (min(h, w)*.35)**2
-    pixels = hsv[face]
+    face.setflags(write=False)
+    return face
+
+
+def piece_color(image):
+    hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+    pixels = hsv[_piece_face_mask(*image.shape[:2])]
     red = ((pixels[:, 0] < 10) | (pixels[:, 0] > 150)) & (pixels[:, 1] > 45) & (pixels[:, 2] > 70)
     return 'red' if red.mean() > .045 else 'black'
 
@@ -85,7 +90,7 @@ class PieceKindClassifier:
         stroke_ratio = float((lighting[center] - gray[center] > 10).mean())
         if (not np.any(image) or np.percentile(interior, 95) - np.percentile(interior, 5) < 10
                 or stroke_ratio < .02):
-            return {'kind': None, 'prediction': None, 'score': 0., 'margin': 0.}
+            return {'kind': None, 'prediction': None, 'score': 0., 'margin': 0., 'class_probabilities': {}}
         views = []
         for shift in (0, -3, 3):
             shifted = image if not shift else cv2.warpAffine(image, np.float32([[1, 0, 0], [0, 1, shift]]),
@@ -104,7 +109,10 @@ class PieceKindClassifier:
         stable = all(int(np.argmax(view)) == int(order[-1]) for view in views)
         accepted = (self.metadata.get('automatic_acceptance_enabled', False) and stable
                     and score >= self.metadata['minimum_probability'] and margin >= self.metadata['minimum_margin'])
+        distribution = {f'{side}_{kind}': float(scores[index]) if side == color else 0.
+                        for side in ('red', 'black') for index, kind in enumerate(KINDS)}
         return {'kind': prediction if accepted else None, 'prediction': prediction, 'score': score, 'margin': margin,
+                'class_probabilities': distribution,
                 'reason': '' if stable else '取样位置变化时棋种不一致'}
 
     def recognize_position(self, images, reference=None, actual=False):

@@ -15,7 +15,7 @@ class CheckpointStore:
             raise ValueError('恢复状态标识无效')
         return self.root / 'tasks' / task_id / 'recovery' / generation
 
-    def save(self, task_id, generation, state, name=None):
+    def save(self, task_id, generation, state, name=None, *, compress=True):
         directory = self.directory(task_id, generation)
         directory.mkdir(parents=True, exist_ok=True)
         name = name or uuid4().hex + '.json'
@@ -36,7 +36,8 @@ class CheckpointStore:
         array_path = directory / (name[:-5] + '.npz')
         if arrays:
             with array_path.with_suffix('.tmp').open('wb') as stream:
-                np.savez_compressed(stream, **arrays)
+                save_arrays = np.savez_compressed if compress else np.savez
+                save_arrays(stream, **arrays)
             array_path.with_suffix('.tmp').replace(array_path)
         target = directory / name
         temporary = directory / (uuid4().hex + '.tmp')

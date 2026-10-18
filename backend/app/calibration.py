@@ -95,6 +95,38 @@ def refine_calibration(frame, calibration):
     return Calibration(corners=[{'x': float(x), 'y': float(y)} for x, y in corners], orientation=calibration.orientation)
 
 
+def refine_from_pieces(frame, calibration, position, readings):
+    known = {(p.square.file, p.square.rank): f'{p.color}_{p.kind}' for p in position.pieces}
+    source, target = [], []
+    for square, reading in readings.items():
+        probabilities = reading['class_probabilities']
+        label = max(probabilities, key=probabilities.get)
+        if reading['confidence'] < .85 or probabilities[label] < .8 or known.get(square) != label:
+            continue
+        x1, y1, x2, y2 = reading['bbox']
+        source.append([(x1 + x2) / 2, (y1 + y2) / 2])
+        target.append([100 + square[0] * 100, 100 + square[1] * 100])
+    if len(source) < 12:
+        return calibration
+    matrix, mask = cv2.findHomography(np.float32(source), np.float32(target), cv2.RANSAC, 10)
+    anchors = np.float32(target)[mask.ravel().astype(bool)] if mask is not None else np.empty((0, 2))
+    if len(anchors) < 12 or np.any(np.ptp(anchors, axis=0) < 600):
+        return calibration
+    ideal = np.float32([[[100, 100], [900, 100], [900, 1000], [100, 1000]]])
+    oriented = cv2.perspectiveTransform(ideal, np.linalg.inv(matrix))
+    if np.max(np.abs(oriented - ideal)) > 60:
+        return calibration
+    if calibration.orientation in ('mirrored', 'mirrored_rotated_180'):
+        oriented[:, :, 0] = 1000 - oriented[:, :, 0]
+        oriented = oriented[:, [1, 0, 3, 2]]
+    if calibration.orientation in ('rotated_180', 'mirrored_rotated_180'):
+        oriented[:, :, 0], oriented[:, :, 1] = 1000 - oriented[:, :, 0], 1100 - oriented[:, :, 1]
+        oriented = oriented[:, [2, 3, 0, 1]]
+    original = _board_transform(tuple((p.x, p.y) for p in calibration.corners), frame.shape[1], frame.shape[0], 100, 100)
+    corners = cv2.perspectiveTransform(oriented, np.linalg.inv(original))[0]
+    return Calibration(corners=[{'x': float(x), 'y': float(y)} for x, y in corners], orientation=calibration.orientation)
+
+
 def detect_calibration(frames: list[np.ndarray]) -> Calibration | None:
     for frame in frames:
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)

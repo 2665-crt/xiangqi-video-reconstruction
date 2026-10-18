@@ -1,5 +1,10 @@
 import json
+import os
 import hashlib
+import weakref
+from collections import deque, OrderedDict
+from contextvars import ContextVar
+from contextlib import ExitStack
 from time import perf_counter as monotonic
 from uuid import uuid4
 
@@ -7,11 +12,12 @@ import cv2
 import numpy as np
 
 from .calibration import rectify_board
-from .chess import board_signature
+from .chess import apply_move, board_signature
 from .schemas import AnalysisStats, Move, MoveRecord, Position, Square
 from .video import iter_frames, save_image
 from .storage import RecoveryCancelled
 from .vision import VisionRequestError
+from .board_evidence import check_transition, needs_backfill, selected_events
 
 
 def _tracking_image(image):
@@ -21,23 +27,133 @@ def _tracking_image(image):
     return image[inset:-inset, inset:-inset] if inset else image
 
 
+_tracking_cache = ContextVar('tracking_cells_cache', default=None)
+
+
 def _tracking_cells(image, reference=None):
+    cache = _tracking_cache.get()
+    if cache is None:
+        return _read_tracking_cells(image, reference)
+    if image.flags.writeable:
+        for key in [key for key in cache if key[0] == id(image)]:
+            del cache[key]
+        return _read_tracking_cells(image, reference)
+    occupied = None if reference is None else tuple(sorted((p.square.file, p.square.rank, p.color) for p in reference.pieces))
+    key = id(image), occupied
+    cached = cache.get(key)
+    if cached is not None and cached[0]() is image:
+        cache.move_to_end(key)
+        return dict(cached[1])
+    prepared = cache.get((id(image), 'prepared'))
+    if prepared is not None and prepared[0]() is image:
+        raw, normal, enhanced = prepared[1]
+        reference_cells = {(p.square.file, p.square.rank): p.color for p in reference.pieces} if reference is not None else None
+        changed = reference_cells is not None and any(reference_cells.get(s) != c for s, c in raw.items())
+        if len(raw) < 90 or changed:
+            if enhanced is None:
+                enhanced = _finish_tracking_cells(image, raw, True)
+                cache[id(image), 'prepared'] = weakref.ref(image), (raw, normal, enhanced)
+            cells = dict(enhanced)
+        else:
+            cells = dict(normal)
+        if reference_cells is not None and any(color is not None and reference_cells.get(s) != color
+                                               for s, color in cells.items()):
+            small = cv2.copyMakeBorder(cv2.resize(_tracking_image(image), (450, 500)), 30, 30, 30, 30, cv2.BORDER_REPLICATE)
+            cells = _filter_reference_cells(small, cells, reference_cells, raw)
+    else:
+        cells = _read_tracking_cells(image, reference)
+    cache[key] = weakref.ref(image), dict(cells)
+    if len(cache) > 64:
+        cache.popitem(last=False)
+    return cells
+
+
+def _read_tracking_cells(image, reference=None):
     from .analysis import read_board_cells
-    from .initial_observation import observe_initial_board
     cells = read_board_cells(_tracking_image(image), strict=True)
     occupied = {(p.square.file, p.square.rank): p.color for p in reference.pieces} if reference is not None else None
     changed = occupied is not None and any(occupied.get(s) != c for s, c in cells.items())
-    if (len(cells) < 90 or changed) and image.shape[0] > image.shape[1]:
-        cells, faces = observe_initial_board(image)
+    return _finish_tracking_cells(image, cells, len(cells) < 90 or changed, occupied)
+
+
+def _finish_tracking_cells(image, cells, expand, reference_cells=None):
+    from .initial_observation import observe_initial_board
+    from .numerical import finger_counts, RING_SIZE
+    from .board_colors import wood_surface_mask, skin_surface_mask
+    raw_cells = cells
+    cells = dict(cells)
+    if expand and image.shape[0] > image.shape[1]:
+        original_cells = dict(cells)
+        cells, faces = observe_initial_board(image, cells=cells)
         for square, (x, y, radius) in faces.items():
             face = cv2.getRectSubPix(image, (round(radius * 1.4), round(radius * 1.4)), (x, y))
-            gray = cv2.cvtColor(cv2.resize(face, (48, 48)), cv2.COLOR_BGR2GRAY).astype(np.float32)
-            yy, xx = np.mgrid[:48, :48]
-            center = (xx - 24) ** 2 + (yy - 24) ** 2 < 13 ** 2
-            ink = cv2.GaussianBlur(gray, (0, 0), 4) - gray
-            if np.percentile(gray[center], 95) - np.percentile(gray[center], 5) < 10 or (ink[center] > 10).mean() < .02:
+            face_hsv = cv2.cvtColor(face, cv2.COLOR_BGR2HSV)
+            skin = skin_surface_mask(face_hsv)
+            if skin is not None and skin.mean() > .08:
                 cells.pop(square, None)
+                continue
+            wood = wood_surface_mask(face_hsv)
+            if wood is not None and wood.mean() > .5:
+                if square in original_cells and original_cells[square] is None:
+                    cells[square] = None
+                else:
+                    cells.pop(square, None)
+                continue
+            if not _piece_lettering_visible(face):
+                cells.pop(square, None)
+    small = cv2.copyMakeBorder(cv2.resize(_tracking_image(image), (450, 500)), 30, 30, 30, 30, cv2.BORDER_REPLICATE)
+    hsv = cv2.cvtColor(small, cv2.COLOR_BGR2HSV)
+    squares = [square for square, color in cells.items() if color is not None]
+    counts = finger_counts(small, hsv, np.asarray(squares, dtype=np.int64).reshape(-1, 2), wood_surface_mask(hsv))
+    for square, count in zip(squares, counts):
+        if count / RING_SIZE > .18:
+            cells.pop(square)
+    return _filter_reference_cells(small, cells, reference_cells, raw_cells)
+
+
+def _piece_lettering_visible(face):
+    gray = cv2.cvtColor(cv2.resize(face, (48, 48)), cv2.COLOR_BGR2GRAY).astype(np.float32)
+    yy, xx = np.mgrid[:48, :48]
+    center = (xx - 24) ** 2 + (yy - 24) ** 2 < 13 ** 2
+    ink = cv2.GaussianBlur(gray, (0, 0), 4) - gray
+    return np.percentile(gray[center], 95) - np.percentile(gray[center], 5) >= 10 and (ink[center] > 10).mean() >= .02
+
+
+def _filter_reference_cells(small, cells, reference_cells, raw_cells):
+    from .board_colors import skin_surface_mask
+    if reference_cells is None:
+        return cells
+    skin = skin_surface_mask(cv2.cvtColor(small, cv2.COLOR_BGR2HSV))
+    if skin is not None:
+        from .analysis import _cell_sampling
+        _, _, ys, xs, _, _, _ = _cell_sampling()
+        covered = skin[ys + 30, xs + 30].mean(axis=1)
+        for (file, rank), color in list(cells.items()):
+            expected = reference_cells.get((file, rank))
+            if color is not None and expected is not None and expected != color and covered[rank * 9 + file] > .03:
+                cells.pop((file, rank), None)
+    for (file, rank), color in list(cells.items()):
+        if color is not None and reference_cells.get((file, rank)) != color and raw_cells.get((file, rank)) == color:
+            x, y = 55 + file * 50, 55 + rank * 50
+            if not _piece_lettering_visible(small[y-18:y+18, x-18:x+18]):
+                cells.pop((file, rank), None)
     return cells
+
+
+def _prepare_tracking_frame(item, tracking_calibration, scan_calibration, scan_end, scan_needed):
+    from .analysis import read_board_cells
+    time_s, frame, decoding, reference_cells, *calibrations = item
+    if calibrations:
+        tracking_calibration = calibrations[0]
+    if cv2.getNumThreads() != 1:
+        cv2.setNumThreads(1)
+    image = rectify_board(frame, tracking_calibration, margin=100)
+    raw = read_board_cells(_tracking_image(image), strict=True)
+    changed = any(reference_cells.get(square) != color for square, color in raw.items())
+    enhanced = _finish_tracking_cells(image, raw, True) if len(raw) < 90 or changed else None
+    normal = _finish_tracking_cells(image, raw, False) if len(raw) == 90 else enhanced
+    scan_image = rectify_board(frame, scan_calibration, margin=50) if scan_needed and time_s <= scan_end + 1e-6 else None
+    return time_s, image, scan_image, (raw, normal, enhanced), decoding
 
 
 def verified_initial_candidates(candidates, images):
@@ -101,11 +217,31 @@ def initial_frame_images(source, time_s, calibration, selected):
     return images or [selected]
 
 
+class PositionHistory(list):
+    def __init__(self, positions):
+        super().__init__()
+        self.by_board, self.by_cells, self.catalog = {}, {}, {}
+        for position in positions:
+            self.append(position)
+
+    def append(self, position):
+        super().append(position)
+        self.by_board[board_signature(position)] = position
+        occupied = tuple(sorted((p.square.file, p.square.rank, p.color) for p in position.pieces))
+        self.by_cells[occupied] = position
+        self.catalog.update((p.id, p) for p in position.pieces)
+
+
 def reconcile_position(current, observed, history):
     signature = board_signature(observed)
-    for previous in reversed(history):
-        if board_signature(previous) == signature:
+    if isinstance(history, PositionHistory):
+        previous = history.by_board.get(signature)
+        if previous is not None:
             return previous.model_copy(deep=True)
+    else:
+        for previous in reversed(history):
+            if board_signature(previous) == signature:
+                return previous.model_copy(deep=True)
     old = {(p.square.file, p.square.rank): p for p in current.pieces}
     pieces, used, remaining = [], set(), []
     for p in observed.pieces:
@@ -115,7 +251,8 @@ def reconcile_position(current, observed, history):
             used.add(previous.id)
         else:
             remaining.append(p)
-    catalog = {p.id: p for state in history + [current] for p in state.pieces}
+    catalog = (history.catalog | {p.id: p for p in current.pieces}) if isinstance(history, PositionHistory) else {
+        p.id: p for state in history + [current] for p in state.pieces}
     for p in remaining:
         candidates = [old_piece for old_piece in catalog.values() if old_piece.id not in used
                       and (old_piece.color, old_piece.kind) == (p.color, p.kind)]
@@ -171,6 +308,8 @@ def revalidate_actual(task):
                 prefix = index
         else:
             record.status, continuous = 'needs_review', False
+            if record.tracking_anchor is not None:
+                current = record.tracking_anchor
     task.confirmed_prefix_length = prefix
     task.status = 'ready' if all(r.status in ('auto_verified', 'corrected') for r in task.moves) else 'needs_review'
     task.stage = '实际局面已保存' if task.status == 'ready' else '仅需核对未解决的画面'
@@ -263,8 +402,6 @@ def find_initial_frame(path, start_s, calibration, on_frame=None, allow_partial=
 
 def _cells_position(current, cells, history):
     occupied = {(p.square.file, p.square.rank): p for p in current.pieces}
-    if len(cells) < 70:
-        return None
     removed = [p for square, p in occupied.items() if square in cells and cells[square] != p.color]
     arrivals = [(square, color) for square, color in cells.items() if color is not None
                 and (square not in occupied or occupied[square].color != color)]
@@ -274,10 +411,17 @@ def _cells_position(current, cells, history):
     for square, color in arrivals:
         candidates = [p for p in removed if p.color == color and p.id not in used]
         if len(candidates) != 1:
-            for previous in reversed(history):
-                previous_cells = {(p.square.file, p.square.rank): p.color for p in previous.pieces}
-                if len(cells) == 90 and all(previous_cells.get(s) == c for s, c in cells.items()):
-                    return previous.model_copy(deep=True)
+            if len(cells) == 90:
+                if isinstance(history, PositionHistory) and all(0 <= f < 9 and 0 <= r < 10 for f, r in cells):
+                    occupied = tuple(sorted((f, r, c) for (f, r), c in cells.items() if c is not None))
+                    previous = history.by_cells.get(occupied)
+                    if previous is not None:
+                        return previous.model_copy(deep=True)
+                else:
+                    for previous in reversed(history):
+                        previous_cells = {(p.square.file, p.square.rank): p.color for p in previous.pieces}
+                        if all(previous_cells.get(s) == c for s, c in cells.items()):
+                            return previous.model_copy(deep=True)
             return None
         piece = candidates[0]
         used.add(piece.id)
@@ -334,13 +478,19 @@ def _glyphs(image, position):
     return np.asarray(result)
 
 
-def actual_events(frames, initial, confirmed_position=None, turn_boundaries=False):
+def actual_events(frames, initial, confirmed_position=None, turn_boundaries=False, cell_reader=None, selected_end_s=None, confirmed_image=None, turn_origin=None, recovery_reader=None, reanchor_reader=None):
     from .analysis import VideoEvent
     first = next(frames, None)
     if first is None:
         return
-    current, history = initial, [initial]
-    cells = _tracking_cells(first[1], initial)
+    current, history = initial, PositionHistory([initial])
+    reader = cell_reader or _tracking_cells
+    cells = reader(first[1], initial)
+    witnesses = {s: (color, first[1], first[0]) for s, color in cells.items()}
+    before_witnesses = dict(witnesses)
+    witness_reference = board_signature(initial)
+    last_recovery_s = first[0] - 1
+    witness_times = {id(first[1]): first[0]}
     occupied = {(p.square.file, p.square.rank): p.color for p in initial.pieces}
     first_clear = len(cells) == 90 and all(occupied.get(s) == c for s, c in cells.items())
     yield VideoEvent(first[0], [first[1]], position=initial)
@@ -352,19 +502,79 @@ def actual_events(frames, initial, confirmed_position=None, turn_boundaries=Fals
     pending_after, pending_image = None, None
     pending_clear = False
     departure_emitted = False
+    source_started = {}
+    pending_start_s = None
+    rejected, rejected_since, rejected_after, rejected_image, rejected_emitted = None, 0, None, None, None
     last_clear_s, moving_colors = first[0], ()
+    rejected_feedback = None
     for time_s, image in frames:
+        if (selected_end_s is not None and time_s > selected_end_s and len(history) == 1
+                and not dirty and pending_after is None and not source_started):
+            break
         last_time, last_image = time_s, image
+        if reanchor_reader is not None and confirmed_position is not None and (selected_end_s is None or time_s <= selected_end_s):
+            anchor_event = reanchor_reader(time_s, image, confirmed_position())
+            if anchor_event is not None:
+                yield anchor_event
+                reference = confirmed_position()
+                if board_signature(reference) == board_signature(anchor_event.position):
+                    current, history = reference, PositionHistory([reference])
+                    baseline, peak, dirty = image, None, False
+                    pending, pending_after, fallback, emitted = None, None, None, None
+                    pending_image, pending_start_s, pending_clear = None, None, False
+                    source_started, departure_emitted = {}, False
+                    rejected, rejected_after, rejected_feedback, rejected_emitted = None, None, None, None
+                    glyph_reference, glyph_since, glyph_pending = None, None, None
+                    last_clear_s, moving_colors = time_s, ()
+                    witnesses = {}
+                    for sample_time, sample_image in zip(anchor_event.image_times_s, anchor_event.images):
+                        witnesses.update({s: (c, sample_image, sample_time) for s, c in reader(sample_image, current).items()})
+                    if not witnesses:
+                        witnesses = {s: (c, image, time_s) for s, c in reader(image, current).items()}
+                    before_witnesses = dict(witnesses)
+                    witness_times = {id(item[1]): item[2] for item in witnesses.values()}
+                    witness_reference = board_signature(current)
+                    cells = reader(image, current)
+                    continue
+        witness_times[id(image)] = time_s
+        if len(witness_times) > 512:
+            retained = {id(baseline), id(image)} | {id(v[1]) for v in witnesses.values()} | {id(v[1]) for v in before_witnesses.values()}
+            witness_times = {key: value for key, value in witness_times.items() if key in retained}
         if confirmed_position is not None:
             reference = confirmed_position()
             if reference is not None and board_signature(reference) != board_signature(current):
                 current = reference
                 history.append(reference)
-                baseline, peak, pending, dirty = image, None, None, False
+                baseline = confirmed_image() if confirmed_image is not None else baseline
+                peak, pending, dirty = None, None, True
                 pending_after, departure_emitted = None, False
                 glyph_reference, glyph_since, glyph_pending = None, None, None
-        cells = _tracking_cells(image, current)
+        cells = reader(image, current)
         occupied = {(p.square.file, p.square.rank): p.color for p in current.pieces}
+        signature = board_signature(current)
+        if signature != witness_reference:
+            before_witnesses = {s: item for s, item in before_witnesses.items() if item[0] == occupied.get(s)}
+            before_witnesses.update({s: item for s, item in witnesses.items() if item[0] == occupied.get(s)})
+            witness_reference = signature
+        if (recovery_reader is not None and time_s - last_recovery_s >= 1
+                and any(occupied.get(s) != color for s, color in cells.items())):
+            last_recovery_s = time_s
+            cells.update(recovery_reader(image, current))
+        for square, color in cells.items():
+            witnesses[square] = color, image, time_s
+            if color == occupied.get(square):
+                before_witnesses[square] = color, image, time_s
+        source_started = {s: t for s, t in source_started.items() if s in occupied}
+        preview = cv2.resize(_tracking_image(image), (450, 500))
+        previous = cv2.resize(_tracking_image(baseline), (450, 500))
+        for square, color in occupied.items():
+            if cells.get(square, 'unknown') == color:
+                source_started.pop(square, None)
+            else:
+                x, y = 25 + square[0] * 50, 25 + square[1] * 50
+                change = cv2.absdiff(preview[y-18:y+19, x-18:x+19], previous[y-18:y+19, x-18:x+19])
+                if square in cells or np.mean(np.max(change, axis=2) > 30) > .3:
+                    source_started.setdefault(square, time_s)
         agrees = all(occupied.get(s) == c for s, c in cells.items())
         if turn_boundaries:
             arrivals = {color for square, color in cells.items()
@@ -377,9 +587,15 @@ def actual_events(frames, initial, confirmed_position=None, turn_boundaries=Fals
                                  departure_only=not arrivals)
                 moving_colors = colors
         if agrees:
+            if confirmed_position is not None and len(cells) == 90 and dirty and pending_after is None and not departure_emitted:
+                yield VideoEvent(time_s, [image], position=current)
+            if pending_after is not None and len(cells) < 90:
+                dirty, peak = True, image
+                continue
             if len(cells) == 90 and pending_after is not None and pending_clear:
-                yield VideoEvent(since, [baseline, pending_image, image], not turn_boundaries, position=pending_after,
-                                 review_reason='' if turn_boundaries else '短暂落子后复位，需核对是否完成了移动和悔棋')
+                yield VideoEvent(since, [baseline, pending_image], not turn_boundaries, position=pending_after,
+                                 review_reason='' if turn_boundaries else '短暂落子后复位，需核对是否完成了移动和悔棋',
+                                 action_start_s=pending_start_s)
                 if turn_boundaries:
                     yield VideoEvent(time_s, [image], position=current)
             if len(cells) == 90 and departure_emitted:
@@ -388,6 +604,8 @@ def actual_events(frames, initial, confirmed_position=None, turn_boundaries=Fals
             pending_after = None
             pending, fallback = None, None
             if len(cells) == 90:
+                rejected, rejected_after = None, None
+                rejected_feedback, rejected_emitted = None, None
                 last_clear_s, moving_colors = time_s, ()
                 if time_s - glyph_checked < .08:
                     if glyph_since is None:
@@ -408,25 +626,156 @@ def actual_events(frames, initial, confirmed_position=None, turn_boundaries=Fals
                 baseline, peak, dirty = image, None, False
             elif any(s not in cells for s in occupied):
                 dirty, peak = True, image
+                if (confirmed_position is not None and not departure_emitted
+                        and any(occupied.get(s) != color for s, color in reader(baseline, current).items())):
+                    # 仅替换仍有矛盾的旧画面；兼容的清晰证据继续保留，遮挡格仍未知。
+                    baseline = image
             continue
         dirty = True
         if peak is None:
             peak = image
         after = _cells_position(current, cells, history)
+        suspended = set()
+        if after is None and confirmed_position is not None:
+            for previous_position in reversed(history):
+                action = snapshot_record(current, previous_position, 1, 0, time_s).move
+                if action is None:
+                    continue
+                source, target = (action.source.file, action.source.rank), (action.target.file, action.target.rank)
+                source_seen, target_seen = witnesses.get(source), witnesses.get(target)
+                if (source_seen is None or target_seen is None or source_seen[0] is not None
+                        or target_seen[0] != action.color
+                        or min(source_seen[2], target_seen[2]) <= last_clear_s):
+                    continue
+                proposed = {(p.square.file, p.square.rank): p.color for p in previous_position.pieces}
+                # 复位的起终点可能分帧露出，随后另一枚子已经被拿起；离盘格保留未知。
+                lifted = {s for s, color in cells.items() if color is None and proposed.get(s) is not None
+                          and s not in (source, target)}
+                if any(proposed.get(s) != color for s, color in cells.items() if s not in lifted):
+                    continue
+                after, suspended = previous_position.model_copy(deep=True), lifted
+                break
+        if after is None and confirmed_position is not None:
+            after = _cells_position(current, {s: item[0] for s, item in witnesses.items()}, history)
+        if after is None and confirmed_position is not None and turn_boundaries:
+            observed_cells = {s: item[0] for s, item in witnesses.items()}
+            arrivals = {color for s, color in observed_cells.items() if color is not None and occupied.get(s) != color}
+            if len(arrivals) == 1:
+                color = next(iter(arrivals))
+                lifted = {s for s, original in occupied.items() if original != color
+                          and s in observed_cells and observed_cells[s] is None}
+                if lifted:
+                    candidate = _cells_position(current, {s: value for s, value in observed_cells.items() if s not in lifted}, history)
+                    if candidate is not None and snapshot_record(current, candidate, 1, 0, time_s).move is not None:
+                        after, suspended = candidate, lifted
         moving = after is not None and not _landing_visible(image, current, after)
+        if after is not None and confirmed_position is not None:
+            action = snapshot_record(current, after, 1, 0, time_s).move
+            if action is not None:
+                mover = next(p for p in current.pieces if p.id == action.piece_id)
+                # 同类棋子的另一处起点仍在操作中时，不能用暂时唯一的空格抢先绑定身份。
+                for piece in current.pieces:
+                    square = piece.square.file, piece.square.rank
+                    if (piece.id == mover.id or (piece.color, piece.kind) != (mover.color, mover.kind)
+                            or square in cells or square not in source_started):
+                        continue
+                    alternative = action.model_copy(update={'piece_id': piece.id, 'source': piece.square})
+                    try:
+                        apply_move(current.model_copy(update={'side_to_move': piece.color}), alternative)
+                    except ValueError:
+                        continue
+                    moving = True
+                    break
         if moving:
             after = None
+        historical_return = (after is not None and confirmed_position is not None
+                             and board_signature(after) in history.by_board
+                             and board_signature(after) != board_signature(current))
+        if after is not None and turn_boundaries:
+            action = snapshot_record(current, after, 1, 0, time_s).move
+            if action is not None and not historical_return:
+                origin = turn_origin() if turn_origin is not None else None
+                original_action = snapshot_record(origin, after, 1, 0, time_s).move if origin is not None else None
+                if original_action is not None and original_action.piece_id == action.piece_id:
+                    # 同一回合的连续调整按最初起点校验，中间位置不作为另一手的起点。
+                    legal_before, legal_action = origin, original_action
+                else:
+                    legal_before, legal_action = current, action
+                try:
+                    apply_move(legal_before.model_copy(update={'side_to_move': legal_action.color}), legal_action)
+                except ValueError:
+                    signature = board_signature(after)
+                    if rejected != signature:
+                        rejected, rejected_since, rejected_after, rejected_image = signature, time_s, after, image
+                    elif time_s - rejected_since >= .18 and rejected_emitted != signature:
+                        rejected_emitted = signature
+                        yield VideoEvent(rejected_since, [baseline, rejected_image, image], True, position=after,
+                            review_reason='局部画面持续出现未解释的棋子变化：落点不符合棋子走法，需核对中间操作或误识别')
+                    continue
+            rejected, rejected_after = None, None
         if after is not None:
             signature = board_signature(after)
+            historical_return = (confirmed_position is not None and signature in history.by_board
+                                 and signature != board_signature(current))
             if pending != signature:
                 if pending_after is not None and pending_clear:
-                    yield VideoEvent(since, [baseline, pending_image, image], not turn_boundaries, position=pending_after,
-                                     review_reason='' if turn_boundaries else '短暂落子后继续操作，需核对这一处变化')
+                    proposed = {(p.square.file, p.square.rank): p.color for p in pending_after.pieces}
+                    contradicted = any(s in cells and cells[s] == occupied.get(s) and cells[s] != color
+                                       for s, color in proposed.items() if occupied.get(s) != color)
+                    if not contradicted:
+                        yield VideoEvent(since, [baseline, pending_image], not turn_boundaries, position=pending_after,
+                                         review_reason='' if turn_boundaries else '短暂落子后继续操作，需核对这一处变化',
+                                         action_start_s=pending_start_s)
+                        reference = confirmed_position() if confirmed_position is not None else pending_after
+                        if reference is not None and board_signature(reference) == board_signature(pending_after):
+                            current = pending_after
+                            history.append(current)
+                            baseline = pending_image
+                            glyph_reference, glyph_since, glyph_pending = None, None, None
+                            after = _cells_position(current, cells, history)
+                            if after is None:
+                                pending, pending_after = None, None
+                                continue
+                            signature = board_signature(after)
                 pending, since = signature, time_s
                 pending_after, pending_image = after, image
-                pending_clear = len(cells) == 90
-            elif time_s - since >= .06:
-                yield VideoEvent(since, [baseline, image], position=after)
+                pending_clear = True
+                changed_sources = [(p.square.file, p.square.rank) for p in current.pieces
+                                   if next((q.square for q in after.pieces if q.id == p.id), p.square) != p.square]
+                pending_start_s = source_started.get(changed_sources[0], time_s) if len(changed_sources) == 1 else None
+            if historical_return or (time_s > since and (turn_boundaries or time_s - since >= .06)):
+                feedback_key = signature, tuple(sorted(cells.items()))
+                if feedback_key != rejected_feedback:
+                    action = snapshot_record(current, after, 1, 0, since).move
+                    check, evidence_images, evidence_times = None, [baseline, image], ()
+                    if action is not None and confirmed_position is not None:
+                        before_cells = reader(baseline, current)
+                        after_cells = {s: color for s, color in cells.items() if s not in suspended}
+                        evidence = {id(image): (time_s, image),
+                                    id(baseline): (witness_times.get(id(baseline), first[0]), baseline)}
+                        for square in (action.source, action.target):
+                            key = square.file, square.rank
+                            earlier, later = before_witnesses.get(key), witnesses.get(key)
+                            if key not in before_cells and earlier is not None:
+                                before_cells[key] = earlier[0]
+                                evidence[id(earlier[1])] = earlier[2], earlier[1]
+                            if key not in after_cells and later is not None:
+                                after_cells[key] = later[0]
+                                evidence[id(later[1])] = later[2], later[1]
+                        check = check_transition(current, after, before_cells, after_cells)
+                        if check.status != 'conflict':
+                            ordered = sorted(evidence.values(), key=lambda item: item[0])
+                            evidence_times = tuple(item[0] for item in ordered)
+                            evidence_images = [item[1] for item in ordered]
+                    yield VideoEvent(since, evidence_images, position=after, action_start_s=pending_start_s,
+                                     image_times_s=evidence_times, board_check=check)
+                if confirmed_position is not None:
+                    reference = confirmed_position()
+                    if reference is not None and board_signature(reference) != signature:
+                        rejected_feedback = feedback_key
+                        pending_after = None
+                        continue
+                rejected_feedback = None
                 current = after
                 history.append(after)
                 last_clear_s = time_s
@@ -449,7 +798,9 @@ def actual_events(frames, initial, confirmed_position=None, turn_boundaries=Fals
                     removed = Position(pieces=[p for p in current.pieces
                         if cells.get((p.square.file, p.square.rank)) == p.color], side_to_move=current.side_to_move)
                     yield VideoEvent(fallback_since, [baseline, image], True, position=removed,
-                                     review_reason='仅有棋子离开棋盘，需确认移除还是拿起停顿')
+                                     review_reason='仅有棋子离开棋盘，需确认移除还是拿起停顿',
+                                     action_start_s=min(source_started.values(), default=None),
+                                     moving_piece_ids=tuple(p.id for p in current.pieces if (p.square.file, p.square.rank) in source_started))
                 continue
             signature = tuple(sorted(cells.items()))
             if fallback != signature:
@@ -458,32 +809,97 @@ def actual_events(frames, initial, confirmed_position=None, turn_boundaries=Fals
                 emitted = signature
                 yield VideoEvent(fallback_since, [baseline, peak, image])
         else:
-            fallback = None
+            changes = tuple(sorted((s, c) for s, c in cells.items() if occupied.get(s) != c))
+            if changes and any(color is not None for _, color in changes) and not moving:
+                if fallback != changes:
+                    fallback, fallback_since = changes, time_s
+                elif time_s - fallback_since >= .18 and emitted != changes:
+                    emitted = changes
+                    yield VideoEvent(fallback_since, [baseline, peak, image], True,
+                                     review_reason='局部画面持续出现未解释的棋子变化，可能缺少中间走棋，请核对这段视频',
+                                     action_start_s=min(source_started.values(), default=None),
+                                     moving_piece_ids=tuple(p.id for p in current.pieces if (p.square.file, p.square.rank) in source_started))
+            else:
+                fallback = None
     if confirmed_position is not None:
         reference = confirmed_position()
         if reference is not None:
             occupied = {(p.square.file, p.square.rank): p.color for p in reference.pieces}
             if len(cells) == 90 and all(occupied.get(s) == c for s, c in cells.items()):
                 dirty = False
+    if rejected_after is not None and rejected_emitted != rejected:
+        yield VideoEvent(rejected_since, [baseline, rejected_image], True, position=rejected_after,
+                         review_reason='局部画面持续出现未解释的棋子变化：区间结束前的落点尚未确认')
     if pending_after is not None and pending_clear:
         yield VideoEvent(since, [baseline, pending_image], True, position=pending_after,
-                         review_reason='区间结束前仅短暂出现落子，请核对或延长区间')
+                         review_reason='区间结束前仅短暂出现落子，请核对或延长区间', action_start_s=pending_start_s)
     elif dirty and not departure_emitted:
         yield VideoEvent(last_time, [baseline, last_image], True,
-                         review_reason="区间结束时操作尚未完成或落点仍被遮挡，请延长区间或核对这处画面")
+                         review_reason="原视频结束时操作尚未完成或落点仍被遮挡，请核对这处画面",
+                         action_start_s=min(source_started.values(), default=None),
+                         moving_piece_ids=tuple(p.id for p in current.pieces if (p.square.file, p.square.rank) in source_started))
+
+
+def backfill_interval(source, start_s, end_s, calibration, before, expected, on_frame=None, motion_active=False, motion_reference_s=None):
+    from .initial_observation import observe_initial_board
+    from .board_motion import BoardMotion
+    timestamps = {}
+    def frames():
+        motion = BoardMotion(calibration, active=motion_active) if calibration is not None else None
+        if motion is not None and motion_reference_s is not None and motion_reference_s < start_s:
+            for reference_time, reference_frame in iter_frames(source, motion_reference_s, motion_reference_s + .2):
+                motion.update(reference_time, reference_frame)
+                if on_frame is not None:
+                    on_frame(reference_time)
+                break
+        for time_s, frame in iter_frames(source, start_s, end_s):
+            if on_frame is not None:
+                on_frame(time_s)
+            image = rectify_board(frame, motion.update(time_s, frame) if motion is not None else calibration, margin=100)
+            timestamps[id(image)] = (weakref.ref(image), time_s)
+            if len(timestamps) > 256:
+                for key in [key for key, value in timestamps.items() if value[0]() is None]:
+                    del timestamps[key]
+            yield time_s, image
+    reader = lambda image, reference: observe_initial_board(image)[0]
+    current, recovered, reference_image = before, [], None
+    origin, moving_piece = before, None
+    for event in actual_events(frames(), before, confirmed_position=lambda: current, turn_boundaries=True, cell_reader=reader,
+                               confirmed_image=lambda: reference_image, turn_origin=lambda: origin):
+        if event.moving_colors:
+            continue
+        if event.review_reason or event.position is None:
+            continue
+        check = check_transition(current, event.position, reader(event.images[0], current),
+                                 reader(event.images[-1], event.position))
+        if check.status == 'conflict':
+            continue
+        if board_signature(current) != board_signature(event.position):
+            action = snapshot_record(current, event.position, 1, 0, event.time_s).move
+            if action is not None and action.piece_id != moving_piece:
+                origin, moving_piece = current, action.piece_id
+            check.backfilled = True
+            recovered.append(event._replace(backfilled=True, board_check=check,
+                image_times_s=tuple(timestamps[id(image)][1] for image in event.images)))
+            current = event.position
+        reference_image = event.images[-1]
+    return recovered if recovered and board_signature(current) == board_signature(expected) else []
 
 
 def analyze_actual(task, store, vision):
     from .analysis import read_board_cells
     from .piece_classifier import local_piece_classifier
-    from .scanning import scan_video
+    from .scanning import VideoScan, scan_video
     initializer = vision
     started, last_saved, previous_usage = monotonic(), monotonic(), list(task.usage)
-    task.run_stats = AnalysisStats()
+    task.run_stats = AnalysisStats(backfill_intervals=0)
     rules = None
     folder = store.task_dir(task.id) / 'evidence'
     folder.mkdir(exist_ok=True)
     source = store.task_dir(task.id) / 'source.mp4'
+    scan = None
+    cache_token = _tracking_cache.set(OrderedDict())
+    preprocessing_stack = ExitStack()
     try:
         if not task.calibration:
             task.status, task.stage = 'needs_review', '未定位棋盘，请调整棋盘四角并保存'
@@ -565,31 +981,58 @@ def analyze_actual(task, store, vision):
             task.initial_turn_known = False
             task.initial_draft, task.initial_piece_reviews = None, []
             task = store.save_analysis(task)
-        task = scan_video(task, store)
-        scan_index = store.task_dir(task.id) / 'scan-index.json'
-        scan_times = [item['time_s'] for item in json.loads(scan_index.read_text(encoding='utf8'))['events']] if scan_index.exists() else []
+        scan = VideoScan(task, store)
+        scan.update(task)
         if task.context_position is None:
             task.context_position = task.initial_position.model_copy(deep=True)
+            task = store.save_analysis(task)
         task.run_stats.initialization_seconds = max(0, monotonic() - started - task.run_stats.model_seconds)
         current = task.context_position
-        history = [task.initial_position] + [r.position_after for r in task.moves if r.position_after is not None] + [current]
+        reference_image = None
+        history = PositionHistory([task.initial_position] + [r.position_after for r in task.moves if r.position_after is not None] + [current])
         begin = task.resume_video_s if task.resume_video_s is not None else min(task.start_s, task.initial_frame_s) if task.initial_frame_s is not None else task.start_s
-        tracking_calibration = task.calibration
+        tracking_calibration = task.resume_calibration if task.resume_video_s is not None and task.resume_calibration else task.calibration
+        calibration_changes = []
+        def motion_at(time_s):
+            return next(((calibration, active, reference_s) for changed_s, calibration, active, reference_s in reversed(calibration_changes)
+                         if changed_s <= time_s + 1e-6), (tracking_calibration, False, None))
+        frame_times = {}
+        last_evidence_s = task.start_s
         def boards():
-            nonlocal task, last_saved, tracking_calibration
-            frames = iter_frames(source, begin, task.end_s)
+            nonlocal task, last_saved, tracking_calibration, frame_times
+            scan_begin = max(task.start_s, scan.cursor) if scan.available and not scan.index['complete'] else begin
+            frames = iter_frames(source, min(begin, scan_begin), task.metadata.duration_s)
             first = True
+            prepared_frames = None
+            motion = None
             while True:
                 decoding = monotonic()
+                image = None
                 try:
-                    time_s, frame = next(frames)
+                    if prepared_frames is None:
+                        time_s, frame = next(frames)
+                        task.run_stats.decode_seconds += monotonic() - decoding
+                        scan.consume(time_s, frame)
+                    else:
+                        time_s, image, scan_image, variants, decoding_seconds = next(prepared_frames)
+                        task.run_stats.decode_seconds += decoding_seconds
+                        scan.consume(time_s, None, board_image=scan_image)
+                        image.setflags(write=False)
+                        cache = _tracking_cache.get()
+                        cache[id(image), 'prepared'] = weakref.ref(image), variants
+                        if len(cache) > 64:
+                            cache.popitem(last=False)
                 except StopIteration:
+                    scan.finish()
+                    scan.update(task)
                     break
-                task.run_stats.decode_seconds += monotonic() - decoding
+                scan.update(task)
+                if time_s + 1e-6 < begin:
+                    continue
                 if first:
                     first = False
                     alignment_frame, alignment_position = frame, current
-                    if task.resume_video_s is not None:
+                    if task.resume_video_s is not None and task.resume_calibration is None:
                         alignment_time = task.initial_frame_s if task.initial_frame_s is not None else task.start_s
                         for _, initial_frame in iter_frames(source, alignment_time, alignment_time + .2):
                             alignment_frame, alignment_position = initial_frame, task.initial_position
@@ -597,33 +1040,148 @@ def analyze_actual(task, store, vision):
                     cells = _tracking_cells(rectify_board(alignment_frame, tracking_calibration, margin=100), alignment_position)
                     occupied = {(p.square.file, p.square.rank): p.color for p in alignment_position.pieces}
                     if ((len(cells) < 90 or any(occupied.get(s) != c for s, c in cells.items()))
-                            and any(color is not None for color in cells.values())):
+                            and any(color is not None for color in cells.values())
+                            and not (task.resume_video_s is not None and task.resume_calibration is not None)):
                         from .calibration import refine_calibration
                         refined = refine_calibration(alignment_frame, tracking_calibration)
                         aligned = _tracking_cells(rectify_board(alignment_frame, refined, margin=100), alignment_position)
                         if len(aligned) == 90 and all(occupied.get(s) == c for s, c in aligned.items()):
                             # 只调整本次跟踪的线网映射，不覆盖用户确认的范围。
                             tracking_calibration = refined
+                        elif os.getenv('VISION_FUSION') == '1':
+                            from .calibration import refine_from_pieces
+                            from .fusion import local_fusion_classifier
+                            alignment_image = rectify_board(alignment_frame, tracking_calibration, margin=100)
+                            readings = local_fusion_classifier().detector.readings(alignment_image)
+                            refined = refine_from_pieces(alignment_frame, tracking_calibration, alignment_position, readings)
+                            aligned = _tracking_cells(rectify_board(alignment_frame, refined, margin=100), alignment_position)
+                            if (len(aligned) >= 70 and all(occupied.get(s) == c for s, c in aligned.items())
+                                    and sum(aligned.get(s) == color for s, color in occupied.items()) >= len(occupied) * .75):
+                                tracking_calibration = refined
+                    from .board_motion import BoardMotion
+                    motion = BoardMotion(tracking_calibration, active=bool(task.resume_video_s is not None
+                        and task.resume_calibration is not None and task.resume_motion_active))
+                    if (task.resume_video_s is not None and task.resume_motion_reference_s is not None and task.resume_calibration is not None
+                            and task.resume_motion_reference_s < time_s):
+                        for reference_time, reference_frame in iter_frames(source, task.resume_motion_reference_s,
+                                                                          task.resume_motion_reference_s + .2):
+                            motion.update(reference_time, reference_frame)
+                            break
+                    elif alignment_frame is not frame:
+                        motion.update(alignment_time, alignment_frame)
+                    tracking_calibration = motion.update(time_s, frame)
+                    calibration_changes.append((time_s, tracking_calibration, motion.active, motion.reference_s))
                 task.analysis_stats.scanned_frames += 1
                 task.run_stats.scanned_frames += 1
                 task.processed_video_s = max(task.start_s, time_s)
                 if monotonic() - last_saved > 1:
-                    task.stage = '跟踪棋子，等待操作完成'
+                    task.stage = '延伸选区末手，等待最终落点' if time_s > task.end_s else '跟踪棋子并核对整体局面'
                     task.run_stats.elapsed_seconds = monotonic() - started
-                    task = store.save_analysis(task)
+                    scan.flush()
+                    task = store.save_progress(task)
                     last_saved = monotonic()
-                yield time_s, rectify_board(frame, tracking_calibration, margin=100)
+                if image is None:
+                    image = rectify_board(frame, tracking_calibration, margin=100)
+                image.setflags(write=False)
+                frame_times[id(image)] = (weakref.ref(image), time_s)
+                if len(frame_times) > 256:
+                    frame_times = {key: value for key, value in frame_times.items() if value[0]() is not None}
+                yield time_s, image
+                if prepared_frames is None:
+                    from functools import partial
+                    from .preprocessing import parallel_batches, process_frames
+                    def remaining():
+                        try:
+                            while True:
+                                decoding = monotonic()
+                                try:
+                                    time_s, frame = next(frames)
+                                except StopIteration:
+                                    return
+                                calibration = motion.update(time_s, frame)
+                                if calibration is not calibration_changes[-1][1]:
+                                    calibration_changes.append((time_s, calibration, motion.active, motion.reference_s))
+                                yield time_s, frame, monotonic() - decoding, {
+                                    (piece.square.file, piece.square.rank): piece.color for piece in current.pieces}, calibration
+                        finally:
+                            if hasattr(frames, 'close'):
+                                frames.close()
+                    process = partial(_prepare_tracking_frame, tracking_calibration=tracking_calibration,
+                                      scan_calibration=scan.calibration, scan_end=task.end_s,
+                                      scan_needed=scan.available and not scan.index['complete'])
+                    cv2.setNumThreads(1)
+                    prepare = process_frames if scan.available else parallel_batches
+                    prepared_frames = preprocessing_stack.enter_context(prepare(remaining(), process))
         last_end, pending_review = task.start_s, None
+        recovery_reader = None
+        visual_recovery = None
+        reanchor_reader = None
+        if source.is_file() and os.getenv('VISION_FUSION') == '1':
+            from .tracking_recovery import VisualRecovery
+            from .fusion import local_fusion_classifier
+            detector = local_fusion_classifier().detector
+            visual_recovery = VisualRecovery(detector.readings)
+            def read_anchor(time_s, image, reference):
+                if not visual_recovery.requested or time_s < visual_recovery.next_check_s:
+                    return None
+                before_checks = visual_recovery.check_count
+                checking = monotonic()
+                candidate = visual_recovery.observe(time_s, image, reference, _tracking_cells(image))
+                checks = visual_recovery.check_count - before_checks
+                if checks > 0:
+                    seconds = monotonic() - checking
+                    task.run_stats.reanchor_checks += checks
+                    task.analysis_stats.reanchor_checks += checks
+                    task.run_stats.reanchor_seconds += seconds
+                    task.analysis_stats.reanchor_seconds += seconds
+                if candidate is None:
+                    return None
+                from .analysis import VideoEvent
+                return VideoEvent(time_s, [item[1] for item in visual_recovery.evidence], position=candidate,
+                    image_times_s=tuple(item[0] for item in visual_recovery.evidence), tracking_anchor=True)
+            reanchor_reader = read_anchor
+            previous_readings = {}
+            def recover_occupied_cells(image, reference):
+                nonlocal previous_readings
+                from .fusion import local_fusion_classifier
+                detector = local_fusion_classifier().detector
+                recovered, observed = {}, {}
+                occupied = {(p.square.file, p.square.rank): f'{p.color}_{p.kind}' for p in reference.pieces}
+                for square, reading in detector.readings(image).items():
+                    probabilities = reading['class_probabilities']
+                    label = max(probabilities, key=probabilities.get)
+                    if reading['confidence'] >= .85 and probabilities[label] >= .8:
+                        box = reading['bbox']
+                        center = (box[0] + box[2]) / 2, (box[1] + box[3]) / 2
+                        observed[square] = label, center
+                        previous = previous_readings.get(square)
+                        color = label.split('_', 1)[0]
+                        if (occupied.get(square) == label or previous is not None and previous[0] == label
+                                and max(abs(a - b) for a, b in zip(center, previous[1])) <= 20):
+                            recovered[square] = color
+                previous_readings = observed
+                return recovered
+            recovery_reader = recover_occupied_cells
         if task.rules_enabled:
             from .turns import TurnReplay
             rules = TurnReplay(task, current)
-            events = actual_events(boards(), current, lambda: current, turn_boundaries=True)
+            events = actual_events(boards(), current, lambda: current, turn_boundaries=True, selected_end_s=task.end_s,
+                                   confirmed_image=lambda: reference_image,
+                                   turn_origin=lambda: rules.before if rules.pending is not None and len(rules.touched) == 1 else None,
+                                   recovery_reader=recovery_reader, reanchor_reader=reanchor_reader)
         else:
-            events = actual_events(boards(), current, lambda: current)
+            events = actual_events(boards(), current, lambda: current, selected_end_s=task.end_s,
+                                   confirmed_image=lambda: reference_image, recovery_reader=recovery_reader, reanchor_reader=reanchor_reader)
+        selected_last_piece = None
+        events = selected_events(events, current, task.end_s, confirmed_position=lambda: current,
+                                 confirmed_piece=lambda: selected_last_piece)
+        recovered_events, attempted_intervals = deque(), set()
+        last_verified_s = begin
+        seen_cells = {}
         while True:
             detecting, previous_decode = monotonic(), task.run_stats.decode_seconds
             try:
-                event = next(events)
+                event = recovered_events.popleft() if recovered_events else next(events)
             except StopIteration:
                 task.run_stats.opencv_seconds += max(0, monotonic() - detecting - task.run_stats.decode_seconds + previous_decode)
                 break
@@ -636,25 +1194,64 @@ def analyze_actual(task, store, vision):
                                    event.departure_only)
                     rules.sync_pending()
                     task.recognition_video_s = max(task.recognition_video_s, event.time_s)
+                    scan.update(task)
                     task.confirmed_prefix_length = next((r.index - 1 for r in task.moves
                         if r.status not in ('auto_verified', 'corrected')), len(task.moves))
-                    task = store.save_analysis(task)
+                    task = store.save_progress(task) if len(task.moves) == previous_records else store.save_analysis(task)
                     if (len(task.moves) > previous_records and rules.pending is None and rules.unresolved is None
                             and event.last_clear_s is not None):
                         from .recovery import save_boundary_checkpoint
-                        save_boundary_checkpoint(store, task, event.last_clear_s, rules.before)
+                        save_boundary_checkpoint(store, task, event.last_clear_s, rules.before, *motion_at(event.last_clear_s))
                 continue
             task.analysis_stats.uncertain_events += int(event.uncertain)
             task.analysis_stats.stable_events += int(not event.uncertain)
             task.run_stats.uncertain_events += int(event.uncertain)
             task.run_stats.stable_events += int(not event.uncertain)
             images = event.images
+            times = list(event.image_times_s) or [frame_times[id(image)][1] if id(image) in frame_times else None for image in images]
+            last_evidence_s = max(last_evidence_s, *(t for t in times if t is not None), event.time_s)
+            task.evidence_end_s = last_evidence_s
             ids = []
             for image in images:
                 name = hashlib.sha256(image.tobytes()).hexdigest()[:32] + '.jpg'
                 if not (folder / name).exists():
                     save_image(folder / name, image)
                 ids.append(name)
+            if event.tracking_anchor:
+                task.run_stats.reanchors += 1
+                task.analysis_stats.reanchors += 1
+                after = reconcile_position(current, event.position, PositionHistory([current]))
+                if rules is not None:
+                    rules.task = task
+                    rules.reanchor(after, event.time_s, ids, times)
+                    current = rules.observed
+                else:
+                    from .records import merge_review
+                    if pending_review is None:
+                        pending_review = MoveRecord(index=len(task.moves) + 1, video_start_s=last_end,
+                            video_end_s=event.time_s, status='needs_review', change_type='review',
+                            position_before=current, timing_status='uncertain')
+                    merge_review(pending_review, event.time_s, [after], ids,
+                        '中间操作未能完整还原；后续已从清晰画面重新同步，历史区间仍需人工审核', times)
+                    pending_review.tracking_anchor, pending_review.tracking_anchor_s = after, event.time_s
+                    pending_review.index = len(task.moves) + 1
+                    task.moves.append(pending_review)
+                    current, pending_review, last_end = after, None, event.time_s
+                history = PositionHistory([current])
+                reference_image, selected_last_piece = images[-1], None
+                last_verified_s = event.time_s
+                seen_cells = {}
+                for sample_time, sample_image in zip(times, images):
+                    seen_cells.update({s: (c, sample_image, sample_time) for s, c in _tracking_cells(sample_image, current).items()})
+                task.stage = '疑点已保留，已从当前清晰画面恢复后续自动识别'
+                task.recognition_video_s = max(task.recognition_video_s, event.time_s)
+                task.recognition_events += 1
+                task.run_stats.elapsed_seconds = monotonic() - started
+                scan.update(task)
+                task = store.save_analysis(task)
+                from .recovery import save_boundary_checkpoint
+                save_boundary_checkpoint(store, task, event.time_s, current, *motion_at(event.time_s))
+                continue
             positions = [event.position] if event.position is not None else []
             if not positions and not event.review_reason and vision is not None:
                 task.stage = '结合已知局面与前后画面确认变化'
@@ -662,7 +1259,7 @@ def analyze_actual(task, store, vision):
                 task.analysis_stats.images_sent += min(3, len(images))
                 task.run_stats.model_requests += 1
                 task.run_stats.images_sent += min(3, len(images))
-                task = store.save_analysis(task)
+                task = store.save_progress(task)
                 requested = monotonic()
                 try:
                     positions = vision.recognize_position(images, reference=current, actual=True)
@@ -672,18 +1269,105 @@ def analyze_actual(task, store, vision):
                     task.run_stats.model_requests += getattr(vision, 'last_request_count', 1) - 1
                 positions = verified_observed_candidates(current, positions, images[0], images[-1])
             unique = {board_signature(p): p for p in positions}
+            audit = None
+            if len(unique) != 1 or event.review_reason:
+                observed = next(iter(unique.values())) if len(unique) == 1 else current
+                audit = check_transition(current, observed, _tracking_cells(images[0], current),
+                                         _tracking_cells(images[-1], observed))
+                audit.status = 'conflict'
+                audit.reason = event.review_reason or '前后可见位置已核对，但尚无唯一落点候选，需回查中间操作'
+            if len(unique) == 1 and not event.review_reason:
+                observed = next(iter(unique.values()))
+                before_cells = _tracking_cells(images[0], current)
+                after_cells = _tracking_cells(images[-1], observed)
+                action = snapshot_record(current, observed, 1, 0, event.time_s).move
+                supplement = {}
+                if action is not None:
+                    expected_before = {(p.square.file, p.square.rank): p.color for p in current.pieces}
+                    for square in (action.source, action.target):
+                        key = square.file, square.rank
+                        previous = seen_cells.get(key)
+                        if key not in before_cells and previous is not None and previous[0] == expected_before.get(key):
+                            before_cells[key] = previous[0]
+                            supplement[id(previous[1])] = previous[1:]
+                audit = event.board_check or check_transition(current, observed, before_cells, after_cells)
+                for old_image, old_time in supplement.values():
+                    name = hashlib.sha256(old_image.tobytes()).hexdigest()[:32] + '.jpg'
+                    if not (folder / name).exists():
+                        save_image(folder / name, old_image)
+                    if name not in ids:
+                        ids.insert(0, name)
+                        times.insert(0, old_time)
+                if supplement:
+                    audit.reason += '；操作前遮挡位置由此前直接可见截图补证'
+                if audit.status == 'conflict':
+                    key = (last_verified_s, board_signature(current))
+                    backfill_end_s = max([event.time_s] + [t for t in times if t is not None])
+                    if (not event.backfilled and source.is_file() and key not in attempted_intervals
+                            and 0 < backfill_end_s - last_verified_s <= 15
+                            and needs_backfill(current, observed, audit)):
+                        attempted_intervals.add(key)
+                        task.analysis_stats.backfill_intervals = (task.analysis_stats.backfill_intervals or 0) + 1
+                        task.run_stats.backfill_intervals += 1
+                        task.stage = f'发现中间漏步，局部回查 {last_verified_s:.1f}～{backfill_end_s:.1f} 秒（本区间仅一次）'
+                        task = store.save_progress(task)
+                        def check_backfill(time_s):
+                            nonlocal task, last_saved
+                            task.analysis_stats.scanned_frames += 1
+                            task.run_stats.scanned_frames += 1
+                            task.analysis_stats.backfill_frames += 1
+                            task.run_stats.backfill_frames += 1
+                            if monotonic() - last_saved > 1:
+                                task.run_stats.elapsed_seconds = monotonic() - started
+                                task = store.save_progress(task)
+                                last_saved = monotonic()
+                        backfill_started = monotonic()
+                        backfill_calibration, backfill_motion_active, backfill_reference_s = motion_at(last_verified_s)
+                        recovered = backfill_interval(source, last_verified_s, backfill_end_s,
+                                                      backfill_calibration, current, observed, check_backfill,
+                                                      motion_active=backfill_motion_active, motion_reference_s=backfill_reference_s)
+                        backfill_seconds = monotonic() - backfill_started
+                        task.analysis_stats.backfill_seconds += backfill_seconds
+                        task.run_stats.backfill_seconds += backfill_seconds
+                        task.stage = '局部回查结束，继续顺序识别'
+                        if recovered:
+                            selected = list(selected_events(iter(recovered), current, task.end_s, selected_last_piece))
+                            if selected:
+                                recovered_events.extend(selected)
+                                continue
+                    task.stage = '顺序识别，保留疑点并等待后续清晰画面'
+                    event = event._replace(uncertain=True, review_reason=audit.reason)
+                else:
+                    reference_image = images[-1]
+                    if action is not None:
+                        selected_last_piece = action.piece_id
+                    expected_after = {(p.square.file, p.square.rank): p.color for p in observed.pieces}
+                    seen_cells = {s: item for s, item in seen_cells.items() if item[0] == expected_after.get(s)}
+                    after_time = times[-1] if times else None
+                    seen_cells.update({s: (color, images[-1], after_time) for s, color in after_cells.items()})
+            if visual_recovery is not None and (event.review_reason or audit is not None and audit.status == 'conflict'):
+                visual_recovery.request(event.time_s)
+            record_payloads_before = None
             if rules is not None:
                 rules.task = task
                 if len(unique) == 1 and not event.review_reason:
+                    if task.initial_turn_known and event.time_s >= task.start_s:
+                        record_payloads_before = tuple(r.model_dump_json(by_alias=True) for r in task.moves)
                     after = reconcile_position(current, next(iter(unique.values())), history)
-                    rules.observe(after, event.time_s, ids)
-                    current = after
-                    history.append(after)
+                    if visual_recovery is not None and board_signature(after) != board_signature(current):
+                        visual_recovery.reset()
+                    rules.observe(after, event.time_s, ids, event.action_start_s, board_check=audit)
+                    current = rules.observed
+                    history.append(current)
+                    last_verified_s = event.time_s
                 elif event.time_s >= task.start_s:
                     rules.uncertain(event.time_s, list(unique.values()), ids, event.review_reason)
                 rules.sync_pending()
+                rules.attach_evidence(audit, ids, times)
             elif len(unique) == 1 and not event.review_reason:
                 after = reconcile_position(current, next(iter(unique.values())), history)
+                if visual_recovery is not None and board_signature(after) != board_signature(current):
+                    visual_recovery.reset()
                 if event.time_s < task.start_s:
                     task.initial_position = after
                 else:
@@ -692,46 +1376,63 @@ def analyze_actual(task, store, vision):
                         remaining = {p.id for p in pending_review.observed_positions[0].pieces}
                         departed = {p.id for p in current.pieces} - remaining
                         resolved_departure = departed <= {p.id for p in after.pieces}
-                    if pending_review is not None and not resolved_departure and not any(
-                            board_signature(p) == board_signature(after) for p in pending_review.observed_positions):
+                    resolved_candidate = (pending_review is not None and len(pending_review.observed_positions) == 1
+                                          and board_signature(pending_review.observed_positions[0]) == board_signature(after))
+                    if pending_review is not None and not resolved_departure and not resolved_candidate:
                         pending_review.index = len(task.moves) + 1
                         task.moves.append(pending_review)
                         last_end = pending_review.video_end_s
                 if event.time_s >= task.start_s and board_signature(after) != board_signature(current):
                     record = snapshot_record(current, after, len(task.moves) + 1, last_end, event.time_s)
+                    record.action_start_s, record.action_end_s = event.action_start_s, event.time_s
+                    record.timing_status = 'observed' if event.action_start_s is not None else 'uncertain'
                     record.evidence_ids = ids
+                    record.evidence_times_s, record.board_check = times, audit
                     task.moves.append(record)
                     last_end = event.time_s
                 current = after
                 history.append(after)
+                last_verified_s = event.time_s
                 # 遮挡期暂存的候选由后续清晰画面消除；不逐帧创建待人工确认步骤。
                 pending_review = None
             elif event.time_s >= task.start_s:
-                if pending_review is not None and pending_review.observed_positions:
-                    pending_review.index = len(task.moves) + 1
-                    task.moves.append(pending_review)
-                    last_end = pending_review.video_end_s
-                pending_review = MoveRecord(index=len(task.moves) + 1, video_start_s=last_end,
-                    video_end_s=event.time_s, status='needs_review', evidence_ids=ids,
-                    observed_positions=list(unique.values()), reason=event.review_reason or '结合前后画面仍无法确定完整局面')
+                if pending_review is None:
+                    pending_review = MoveRecord(index=len(task.moves) + 1, video_start_s=last_end,
+                        video_end_s=event.time_s, status='needs_review', evidence_ids=ids,
+                        position_before=current, change_type='review', timing_status='uncertain',
+                        observed_positions=list(unique.values()), reason=event.review_reason or '结合前后画面仍无法确定完整局面')
+                    pending_review.evidence_times_s = times
+                    from .records import merge_review
+                    merge_review(pending_review, event.time_s, [], [], pending_review.reason)
+                else:
+                    from .records import merge_review
+                    merge_review(pending_review, event.time_s, list(unique.values()), ids, event.review_reason, times)
+                pending_review.board_check = audit
             task.confirmed_prefix_length = next((r.index - 1 for r in task.moves
                 if r.status not in ('auto_verified', 'corrected')), len(task.moves))
             task.usage = previous_usage + (vision.usage if vision is not None else [])
             task.run_stats.elapsed_seconds = monotonic() - started
             task.recognition_video_s = max(task.recognition_video_s, event.time_s)
             task.recognition_events += 1
-            task.pending_event_count = sum(time_s > task.recognition_video_s for time_s in scan_times)
-            task = store.save_analysis(task)
+            scan.update(task)
+            # 正常观测可能只更新待确认回合，也可能修改较早的悔棋标注，须比较全部历史。
+            pending_only = rules is not None and (len(unique) != 1 or bool(event.review_reason) or (
+                record_payloads_before is not None and len(record_payloads_before) == len(task.moves)
+                and all(before == record.model_dump_json(by_alias=True)
+                        for before, record in zip(record_payloads_before, task.moves))))
+            task = store.save_progress(task) if pending_only else store.save_analysis(task)
             if rules is None and pending_review is None and len(_tracking_cells(images[-1], current)) == 90:
                 from .recovery import save_boundary_checkpoint
-                save_boundary_checkpoint(store, task, task.processed_video_s, current)
+                checkpoint_s = times[-1] if times and times[-1] is not None else event.time_s
+                save_boundary_checkpoint(store, task, checkpoint_s, current, *motion_at(checkpoint_s))
         if rules is not None:
             rules.task = task
-            rules.end(task.end_s)
+            rules.end(max(task.end_s, last_evidence_s))
         elif pending_review is not None:
             task.moves.append(pending_review)
         task.processed_video_s = task.end_s
         task.recognition_video_s = task.end_s
+        scan.update(task)
         task.pending_event_count = 0
         task.status = 'needs_review' if any(r.status not in ('auto_verified', 'corrected') for r in task.moves) else 'ready'
         task.stage = ('分析结束，请审核违规或疑点，后续走棋将在确认后重新校验' if task.status == 'needs_review'
@@ -744,6 +1445,9 @@ def analyze_actual(task, store, vision):
     except RecoveryCancelled:
         return
     except VisionRequestError as exc:
+        if scan is not None:
+            scan.flush()
+            task = scan_video(task, store)
         if task.recovery is not None:
             from .recovery import defer_operation
             task.usage = previous_usage + vision.usage
@@ -766,5 +1470,9 @@ def analyze_actual(task, store, vision):
         task.run_stats.elapsed_seconds = monotonic() - started
         store.save_analysis(task)
     finally:
+        preprocessing_stack.close()
+        if scan is not None:
+            scan.flush()
+        _tracking_cache.reset(cache_token)
         if vision is not None:
             vision.close()
