@@ -16,6 +16,4 @@ output/
 录屏存放/
 直播录屏/
 experiments/
-backend/models/fusion/*.pt
-backend/models/board-layout-v1.onnx
 backend/tests/fixtures/

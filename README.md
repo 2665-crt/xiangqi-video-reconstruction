@@ -25,11 +25,11 @@
 ```powershell
 git clone https://github.com/2665-crt/xiangqi-video-reconstruction.git
 cd xiangqi-video-reconstruction
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts/setup.ps1
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts/start.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/setup.ps1 -Fusion
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/start-fusion.ps1
 ```
 
-打开 <http://127.0.0.1:5278/>。默认先提供上传、校准、手动设置棋局、复盘和导出；没有配置模型服务时自动识别按钮会给出配置提示。
+打开 <http://127.0.0.1:5278/>。上述入口启用本地融合识别，所需训练好的模型已随仓库提供，无需重新训练或填写云端 API Key。安装依赖需要联网；识别在本机执行。
 
 停止本项目服务：
 
@@ -39,18 +39,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/stop.ps1
 
 ### 开启本地融合识别与深度重检
 
-第三方 YOLO 权重未随仓库分发。请先阅读 [模型配置与来源](docs/models.md)，确认有权使用并放置匹配的权重，然后执行：
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts/setup.ps1 -Fusion
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts/start-fusion.ps1
-```
-
-融合模式使用本地模型，不需要填写云端 API Key。部分无法确定的内容仍会保留人工审核。
+仓库包含本项目训练的 CNN、颜色模型，以及第三方 YOLO 检测和整盘布局模型。使用上面的 `setup.ps1 -Fusion` 和 `start-fusion.ps1` 即可加载，无需另外下载权重。各模型的来源、作者账号、版本、SHA256 和上游许可说明见 [模型配置与来源](docs/models.md) 与 [第三方署名](THIRD_PARTY.md)。部分无法确定的内容仍会保留人工审核。
 
 ### 可选的模型接口配置
 
-需要模型接口时，将 `.env.example` 复制为 `.env`，自行填写接口地址、模型名和密钥，再重启普通启动入口。模型接口可能将棋盘截图发送给你配置的服务商，并产生费用。密钥只保存在本地，默认不会提交。
+需要模型接口时，将 `.env.example` 复制为 `.env`，自行填写接口地址、模型名和密钥，再使用 `scripts/start.ps1` 普通入口启动。普通入口不启用本地融合识别。模型接口可能将棋盘截图发送给你配置的服务商，并产生费用。密钥只保存在本地，默认不会提交。
 
 ## 基本操作
 
@@ -64,15 +57,15 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/start-fusion.ps1
 
 本项目实现视频事件跟踪、走棋状态与时间整理、人工编辑、选区重检与写回、任务持久化、复盘交互及录像导出。技术栈为 React / TypeScript / Vite、FastAPI / Pydantic / SQLite、OpenCV / PyAV / ONNX Runtime。
 
-识别还复用了第三方视觉模型及 Ultralytics 推理组件；不是所有模型都由本项目训练。来源、排除的权重及授权状态见 [THIRD_PARTY.md](THIRD_PARTY.md)。
+识别还复用了第三方视觉模型及 Ultralytics 推理组件；不是所有模型都由本项目训练。来源、署名及上游许可说明见 [THIRD_PARTY.md](THIRD_PARTY.md)。
 
 ## 验证与限制
 
 - 手动编辑、选区漏步补入、错序修正和重复走法保留具有自动化测试。
 - 一段实际选区 501.133—746.835 秒的本地验收扫描了 4669 帧，确认 10 手，补入 7 手、更新 3 手；另有 10 处疑点保留。此结果不是任意视频的准确率保证。
 - 重遮挡、摆棋、悔棋、光照及模糊仍可能需要人工核对。程序不会保证每次都完整自动还原。
-- 本次公开快照不包含个人视频、任务数据库、训练图片集、真实录像回归素材、内部输出以及授权未确认的第三方权重。
-- 默认依赖安装流程与 Windows 脚本随源码提供；新电脑需具备上述运行环境。第三方权重需自行配置。
+- 本次公开快照不包含个人视频、任务数据库、训练图片集或真实录像回归素材。
+- 训练好的模型、依赖安装流程与 Windows 脚本随源码提供；新电脑仍需具备上述运行环境。当前尚未提供免安装 EXE。
 
 ## 开发检查
 
@@ -89,7 +82,7 @@ npm run build
 
 ```text
 backend/app/       视频、识别、走棋、持久化和导出 API
-backend/models/    本地模型参数及第三方模型来源清单
+backend/models/    训练好的本地模型及第三方模型来源清单
 backend/tests/     单元和合成视频回归测试
 frontend/src/      复盘工作台、人工编辑和录像渲染页面
 scripts/           Windows 安装、启动、停止和录像渲染入口
@@ -98,4 +91,4 @@ docs/              模型与测试说明
 
 ## 许可证状态
 
-本次尚未指定整个项目的统一开源许可证。第三方组件和模型遵循各自授权；公开展示源码不代表第三方权重已获再分发许可。计划复用、再分发或商用时，请先核对各项授权。
+本项目以免费作品展示及学习研究为发布目的，尚未指定整个项目的统一开源许可证。第三方组件和模型保留原作者署名与各自许可说明；本仓库的来源标注不构成额外授权，也不扩大上游允许的使用范围。详情见 [THIRD_PARTY.md](THIRD_PARTY.md)。
