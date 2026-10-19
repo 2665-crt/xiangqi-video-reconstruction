@@ -1,0 +1,68 @@
+{
+  "version": 1,
+  "algorithm": "small CNN, seven glyph kinds; local color is kept separately",
+  "preprocessing": "continuous grayscale strokes; 96px physical face ROI with smooth white-surface moments and full-board sampling v4; no binarization",
+  "sampling_weights": {
+    "new_user_live_real_pieces": 0.5,
+    "verified_real_white_plastic": 0.15,
+    "public_real_photos": 0.15,
+    "additional_camera_photos": 0.05,
+    "public_physical_wood": 0.05,
+    "other_styles": 0.05,
+    "synthetic_fonts_auxiliary": 0.05
+  },
+  "classes": [
+    "king",
+    "rook",
+    "horse",
+    "cannon",
+    "advisor",
+    "elephant",
+    "pawn"
+  ],
+  "output_colors": [
+    "red",
+    "black"
+  ],
+  "input_size": 48,
+  "minimum_probability": 0.9,
+  "minimum_margin": 0.2,
+  "model_sha256": "f8a20c62828e3ed262b463d95048e556a35037fbd6ea4f9b7f22d45e417bba2f",
+  "training_records": 5933,
+  "unique_training_images": 5055,
+  "training_source_groups": [
+    "additional_real_train",
+    "nrl_physical_train",
+    "public_rotating_wood_glyphs",
+    "public_virtual_glyph_styles",
+    "public_yellow_plastic_photo",
+    "separate_verified_plastic_video",
+    "synthetic_system_fonts",
+    "user_live_training",
+    "verified_old_video_stable_tracking"
+  ],
+  "training_video_sha256": "780c4a37a4615989da9c594cbe182cf1ea4ba476452819a858b61611097f753a",
+  "training_video_sha256s": [
+    "780c4a37a4615989da9c594cbe182cf1ea4ba476452819a858b61611097f753a",
+    "7ae57b327e6343e71efc6de60ab1a223fa08bf1b4520996fd962332d964ad263",
+    "96a531afd0361f880f3b662f65321b435cf5d60c59494a0d8684f30664e7610a"
+  ],
+  "training_steps": 18000,
+  "continued_from_sha256": "4b34585f462c8b23dc95fe221dd2a25c0f7e7d947328732e9b8cb4f6438aba64",
+  "learning_rate": 0.0001,
+  "seed": 20261011,
+  "locked_before_independent_evaluation": true,
+  "automatic_acceptance_enabled": true,
+  "inference_rotations_degrees": [
+    0,
+    90,
+    180,
+    270
+  ],
+  "acceptance": {
+    "passed": true,
+    "target_95_passed": false,
+    "criterion": "colour and kind must both be correct; red, black and overall accuracy >=90% on each primary physical evaluation set and current video; target >=95%",
+    "report": "output/piece-classifier-validation/cnn-independent-result.json"
+  }
+}

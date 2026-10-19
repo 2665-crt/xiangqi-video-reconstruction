@@ -1,0 +1,8 @@
+{
+  "source_repo": "DuyLeTran/DeepXiangQi",
+  "source_commit": "a9265ae50d0ccaba1dae09ef83b2f4c4cc0dac19",
+  "sha256": {
+    "detect-ultra.pt": "798795334ee7538eb6a0ec37d0cdca15fff4b230a5fdf6b9b402d7f3c154fb30",
+    "detect-aux.pt": "a5db1b87fb12fa99ec9eac4fe751593eb9a08aa508a61d64463128ba72063886"
+  }
+}

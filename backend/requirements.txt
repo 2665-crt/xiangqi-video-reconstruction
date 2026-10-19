@@ -1,0 +1,13 @@
+fastapi==0.116.1
+uvicorn==0.35.0
+httpx==0.28.1
+python-multipart>=0.0.20,<1
+python-dotenv>=1.1,<2
+pydantic>=2.11,<3
+numpy>=2.0,<3
+opencv-python-headless>=4.11,<5
+av>=14,<18
+pytest>=8.4,<9
+onnxruntime==1.23.2
+joblib==1.5.3
+numba==0.68.0
