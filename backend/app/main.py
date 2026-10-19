@@ -127,7 +127,7 @@ def create_app(data_root: Path | None = None, recording_root: Path | None = None
                 with vision_runtime_lock:
                     local_fusion_classifier()
             except ModuleNotFoundError as exc:
-                raise HTTPException(503, f'本地融合识别环境缺少 {exc.name}，请使用 scripts/start-fusion.ps1 启动完整识别环境。') from None
+                raise HTTPException(503, f'本地融合识别环境缺少 {exc.name}，请先运行 scripts/setup.ps1 -Fusion，再使用 scripts/start-fusion.ps1 启动。') from None
 
     @app.get("/api/health")
     def health():
@@ -146,7 +146,7 @@ def create_app(data_root: Path | None = None, recording_root: Path | None = None
     @app.post("/api/tasks", status_code=201, response_model=Task)
     async def upload(file: UploadFile):
         if not (file.filename or "").lower().endswith(".mp4"):
-            raise HTTPException(422, "第一版请上传 MP4 视频")
+            raise HTTPException(422, "请上传 MP4 视频")
         uploads = store.root / "uploads"
         uploads.mkdir(exist_ok=True)
         temporary = uploads / f"{uuid4().hex}.mp4"
@@ -322,7 +322,7 @@ def create_app(data_root: Path | None = None, recording_root: Path | None = None
         vision = VisionClient()
         if not vision.configured:
             vision.close()
-            raise HTTPException(409, "请先在后端配置视觉模型")
+            raise HTTPException(409, "视觉模型未就绪，请运行 scripts/setup.ps1 -Fusion 和 scripts/start-fusion.ps1；云端接口配置见 README")
         if not analysis_lock.acquire(timeout=1):
             vision.close()
             raise HTTPException(409, "已有识别正在进行，请稍后重试")
@@ -362,7 +362,7 @@ def create_app(data_root: Path | None = None, recording_root: Path | None = None
         vision = None if local_only else VisionClient()
         if vision is not None and not vision.configured:
             vision.close()
-            raise HTTPException(409, "请先在后端配置视觉模型，上传与人工复盘仍可使用")
+            raise HTTPException(409, "视觉模型未就绪，请运行 scripts/setup.ps1 -Fusion 和 scripts/start-fusion.ps1；上传与人工复盘仍可使用")
         if task.initial_position is None and not actual:
             if vision is not None:
                 vision.close()
