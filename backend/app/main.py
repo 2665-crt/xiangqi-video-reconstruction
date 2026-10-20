@@ -37,8 +37,8 @@ def run_analysis_worker(task_id: str, data_root: str, local_only: bool = False, 
 
 
 def create_app(data_root: Path | None = None, recording_root: Path | None = None):
-    store = TaskStore(data_root or PROJECT_ROOT / "data")
-    recordings = RecordingManager(store.root / 'recordings', recording_root or PROJECT_ROOT / '录屏存放')
+    store = TaskStore(data_root or Path(os.getenv('XIANGQI_DATA_ROOT', str(PROJECT_ROOT / 'data'))))
+    recordings = RecordingManager(store.root / 'recordings', recording_root or Path(os.getenv('XIANGQI_RECORDING_ROOT', str(PROJECT_ROOT / '录屏存放'))))
     workers = {}
     recheck_threads = {}
     analysis_lock = threading.Lock()

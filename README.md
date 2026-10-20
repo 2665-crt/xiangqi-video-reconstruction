@@ -2,7 +2,19 @@
 
 从实拍象棋对局视频中定位棋盘、跟踪棋子移动，重建可回放的棋谱。支持人工校正、区域逐帧重检与虚拟棋盘录像导出。
 
-本项目在 Windows 电脑上运行，使用浏览器操作。仓库包含正式版程序和训练好的模型；首次使用需安装下列运行环境，当前没有免安装 EXE。
+本项目提供 Windows 免安装桌面版，也可从源码运行。仓库和便携包均包含训练好的本地模型，无需重新训练或配置云端 API Key。
+
+## 下载免安装版
+
+打开 [最新 Release](https://github.com/2665-crt/xiangqi-video-reconstruction/releases/latest)，在 **Assets** 中下载 `XiangQi-Vedio-Reconstruction-0.2.0-win-x64.zip`（约 645 MiB）。
+
+1. 将整个 ZIP 解压到可写目录。
+2. 双击 `XiangQi Vedio Reconstruction.exe`，等待本地模型加载。
+3. 上传 MP4，按界面完成棋盘定位、初始局面核对和分析；可人工校正并导出棋盘录像。
+
+保留 EXE 旁的全部文件，不要只复制 EXE。便携版无需安装 Python、Node.js 或 Chrome。任务保存在应用目录的 `data`，导出录像在 `录屏存放`；移动应用时请保留这两个目录。GitHub 自动生成的 **Source code** ZIP 是源码包，直接使用请选择上面的便携包。
+
+当前便携版在本机 Windows x64 完成识别、录像导出与解压启动验收；未签名，尚未在其他实体电脑验证。未确定的识别结果仍需核对，不保证任意视频都能无误自动还原。第三方模型与组件说明见 [THIRD_PARTY.md](THIRD_PARTY.md)，桌面版构建方法见 [desktop/README.md](desktop/README.md)。
 
 ## 功能
 
@@ -14,7 +26,7 @@
 - 导出虚拟棋盘 MP4 录像，支持每手 1 / 2 / 3 秒。
 - 山水风格工作台，可折叠区域重检详情，适配减少动态效果设置。
 
-## 运行环境
+## 源码运行环境
 
 - Windows 10 / 11，64 位 x86-64 系统；其他操作系统和 Windows ARM 尚未验证。
 - [Python 3.12（64 位）](https://www.python.org/downloads/)：安装时勾选 Python Launcher 或 Add Python to PATH。
@@ -23,7 +35,7 @@
 - 首次安装依赖需要联网。上述软件安装完成后，重新打开 PowerShell。
 - 固定使用本机 `127.0.0.1:5278`（前端）和 `127.0.0.1:8278`（后端）。端口被占用时启动脚本会停止，不会关闭其他程序。
 
-## 安装与启动
+## 从源码安装与启动
 
 可以使用 Git 下载，也可以在仓库页面选择 **Code → Download ZIP** 并完整解压。使用 ZIP 时跳过下面前两行，在解压后的项目目录打开 PowerShell；该目录应同时包含 `README.md`、`scripts`、`backend` 和 `frontend`。
 
