@@ -16,7 +16,7 @@ from app import recording
 
 def test_parallel_renderer_keeps_order_and_repeats():
     root = Path(__file__).resolve().parents[2]
-    result = subprocess.run(['node', str(root / 'output/playwright/recording-pipeline/test-renderer.cjs')],
+    result = subprocess.run(['node', str(Path(__file__).parent / 'fixtures/recording/test-renderer.cjs')],
                             cwd=root, capture_output=True, text=True, timeout=10)
     assert result.returncode == 0, result.stderr
     assert 'CONCURRENT_CAPTURE_AND_ORDER_PASSED' in result.stdout

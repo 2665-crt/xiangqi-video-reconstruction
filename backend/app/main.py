@@ -436,12 +436,13 @@ def create_app(data_root: Path | None = None, recording_root: Path | None = None
                     fixed = correct_interval(task, index, actions, request.video_time_s)
         except ValueError as exc:
             raise HTTPException(422, str(exc))
-        if request.action_start_s is not None:
+        if request.action_start_s is not None and not (request.moves == [] and request.position is None):
             record = fixed.moves[index - 1]
-            preceding = (task.moves[index - 2].action_end_s if task.moves[index - 2].action_end_s is not None else task.moves[index - 2].video_end_s) if index > 1 else task.start_s
-            if not preceding <= request.action_start_s <= record.video_end_s:
-                raise HTTPException(422, '动作开始时间必须位于前一步落定与本步落定之间')
-            record.action_start_s, record.action_end_s, record.timing_status = request.action_start_s, record.video_end_s, 'observed'
+            record.action_start_s = request.action_start_s if request.action_start_s <= record.video_end_s else None
+            record.action_end_s = record.video_end_s
+            record.timing_status = 'observed' if record.action_start_s is not None else 'uncertain'
+            if record.action_start_s is not None:
+                record.video_start_s = min(record.video_start_s, record.action_start_s)
         fixed.recovery = None
         fixed.recheck = None
         return save_task(fixed, task.revision if task.status == 'analyzing' else request.revision)

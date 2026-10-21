@@ -56,7 +56,7 @@ export function ReviewPanel({ task, index, position, onSave, onSavePosition, onC
 
   function switchMode(next: 'move' | 'position') {
     setMode(next); setPieceId(''); setTarget(null); setBrush(''); setFeedback(''); setPickingTarget(false);
-    setStaged(next === 'position' ? record?.position_after ?? position : position);
+    setStaged(next === 'position' ? record?.position_after ?? (record?.status === 'tentative' ? record.predicted_position : null) ?? position : position);
   }
 
   return <section className="review-panel board-review"><div className="section-heading"><h3>{insert ? '插入遗漏走棋' : isInterval ? '核对视频区间' : `校正第 ${displayStep(task, index)} 手`}</h3><button className="text-button" onClick={onClose}>关闭</button></div>
@@ -79,18 +79,17 @@ export function ReviewPanel({ task, index, position, onSave, onSavePosition, onC
     </div>}
     {piece && <p className="selected-piece" role="status">已选{piece.color === 'red' ? '红' : '黑'}{pieceText[piece.color][piece.kind]}{target ? ` → 第${target.file + 1}列第${target.rank + 1}行` : '，请点击落点'} <button className="text-button" onClick={() => { setPieceId(''); setTarget(null); setPickingTarget(false); }}>重新选择</button></p>}
     {mode === 'move' && !!record?.candidates.length && <div className="candidate-buttons">{record.candidates.map((m, i) => <button key={i} disabled={busy} onClick={() => { setPieceId(m.piece_id); setTarget(m.to); }}>候选 {i + 1}</button>)}</div>}
-    <label>落子时间（原视频秒）<input aria-label="落子时间" type="number" min={task.start_s} max={Math.min(task.metadata.duration_s, Math.max(task.end_s, task.evidence_end_s ?? 0, record?.action_end_s ?? record?.video_end_s ?? 0))} step="any" value={time} disabled={busy} onChange={e => setTime(Number(e.target.value))} /></label>
-    <label>动作开始时间（原视频秒）<input aria-label="动作开始时间" type="number" min={task.start_s} max={time} step="any" value={startTime} disabled={busy} onChange={e => setStartTime(e.target.value === '' ? '' : Number(e.target.value))} /></label>
+    <label>落子时间（原视频秒）<input aria-label="落子时间" type="number" min={0} max={task.metadata.duration_s} step="any" value={time} disabled={busy} onChange={e => setTime(Number(e.target.value))} /></label>
+    <label>动作开始时间（原视频秒）<input aria-label="动作开始时间" type="number" min={0} max={task.metadata.duration_s} step="any" value={startTime} disabled={busy} onChange={e => setStartTime(e.target.value === '' ? '' : Number(e.target.value))} /></label>
     {record?.action_end_s != null && record.action_end_s > task.end_s && <p className="hint">本手在选区内开始，最终落点已延伸至选区外 {record.action_end_s.toFixed(3)} 秒核对。</p>}
     <button className="primary full" aria-busy={busy} onClick={() => {
       if (busy) { setFeedback('正在提交，请等待；当前校正内容已保留。'); return; }
-      if (startTime !== '' && startTime > time) { setFeedback('动作开始时间不能晚于落子时间。'); return; }
       if (mode === 'position') onSavePosition(staged, time, startTime === '' ? undefined : startTime);
       else if (action) onSave([action], time, startTime === '' ? undefined : startTime);
       else setFeedback('请点选移动棋子和最终落点。');
     }}>{insert ? '保存并继续补棋' : mode === 'position' ? '保存当前局面' : '确认并保存这一步'}</button>
     {record && <button className="text-button" disabled={busy} onClick={() => {
-      if (window.confirm('确认此处不计入走棋？该记录将从步骤列表、计数、回放和导出中跳过。')) onSave([], time);
+      if (window.confirm('确认此处不计入走棋？该记录将从步骤列表、计数、回放和导出中跳过。')) onSave([], record.action_end_s ?? record.video_end_s);
     }}>此处不计入走棋</button>}
     {!!record?.evidence_ids.length && <AnimatedDisclosure title={<> 查看操作前后原视频证据</>}><div className="evidence-strip">{record.evidence_ids.map((id, i) => <a key={id} href={`/api/tasks/${task.id}/evidence/${id}`} target="_blank" rel="noreferrer"><img src={`/api/tasks/${task.id}/evidence/${id}`} alt={isInterval ? '待核对视频区间证据截图' : `第${displayStep(task, index)}手原视频证据截图`} /><small>{record.evidence_times_s?.[i] != null ? `${record.evidence_times_s[i]!.toFixed(3)} 秒` : '历史截图，时间未记录'}</small></a>)}</div></AnimatedDisclosure>}
   </section>;

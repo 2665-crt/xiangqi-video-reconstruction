@@ -300,6 +300,9 @@ def revalidate_actual(task):
     current, prefix, continuous = task.initial_position, 0, True
     for index, record in enumerate(task.moves, 1):
         record.index = index
+        if record.status == 'tentative' and record.predicted_position is not None:
+            record.position_after, current, continuous = None, record.predicted_position, False
+            continue
         if record.position_after is not None and record.status in ('auto_verified', 'corrected'):
             rebuilt = snapshot_record(current, record.position_after, index, record.video_start_s, record.video_end_s)
             record.move, record.change_type = rebuilt.move, rebuilt.change_type
@@ -330,10 +333,10 @@ def correct_actual(task, index, actions, time_s=None, position=None):
         raise ValueError('前一处局面尚未确定，请先确认局面')
     original = task.moves[index - 1] if index <= len(task.moves) else None
     preceding = task.moves[index - 2].video_end_s if index > 1 else task.start_s
-    following = task.moves[index].video_end_s if index < len(task.moves) else task.end_s
     time_s = time_s if time_s is not None else original.video_end_s if original else task.processed_video_s
-    if not preceding <= time_s <= following:
-        raise ValueError('操作完成时间必须位于前后步骤的时间范围内')
+    if not 0 <= time_s <= task.metadata.duration_s:
+        raise ValueError('时间必须位于原视频范围内')
+    preceding = min(preceding, time_s)
     current, replacement = before, []
     if position is not None:
         after = reconcile_position(current, position, [task.initial_position] + [r.position_after for r in task.moves[:index - 1] if r.position_after])
@@ -478,8 +481,8 @@ def _glyphs(image, position):
     return np.asarray(result)
 
 
-def actual_events(frames, initial, confirmed_position=None, turn_boundaries=False, cell_reader=None, selected_end_s=None, confirmed_image=None, turn_origin=None, recovery_reader=None, reanchor_reader=None):
-    from .analysis import VideoEvent
+def actual_events(frames, initial, confirmed_position=None, turn_boundaries=False, cell_reader=None, selected_end_s=None, confirmed_image=None, turn_origin=None, recovery_reader=None, reanchor_reader=None, inference_active=None):
+    from .analysis import VideoEvent, _occupied_squares
     first = next(frames, None)
     if first is None:
         return
@@ -509,13 +512,20 @@ def actual_events(frames, initial, confirmed_position=None, turn_boundaries=Fals
     rejected_feedback = None
     for time_s, image in frames:
         if (selected_end_s is not None and time_s > selected_end_s and len(history) == 1
-                and not dirty and pending_after is None and not source_started):
+                and not dirty and pending_after is None and not source_started
+                and not (inference_active is not None and inference_active())):
             break
         last_time, last_image = time_s, image
-        if reanchor_reader is not None and confirmed_position is not None and (selected_end_s is None or time_s <= selected_end_s):
+        if reanchor_reader is not None and confirmed_position is not None and (selected_end_s is None or time_s <= selected_end_s
+                or inference_active is not None and inference_active()):
             anchor_event = reanchor_reader(time_s, image, confirmed_position())
             if anchor_event is not None:
+                if anchor_event.selection_complete:
+                    break
+                unchanged = _occupied_squares(confirmed_position()) == _occupied_squares(anchor_event.position)
                 yield anchor_event
+                if unchanged:
+                    continue
                 reference = confirmed_position()
                 if board_signature(reference) == board_signature(anchor_event.position):
                     current, history = reference, PositionHistory([reference])
@@ -536,6 +546,8 @@ def actual_events(frames, initial, confirmed_position=None, turn_boundaries=Fals
                     witness_reference = board_signature(current)
                     cells = reader(image, current)
                     continue
+        if inference_active is not None and inference_active():
+            continue
         witness_times[id(image)] = time_s
         if len(witness_times) > 512:
             retained = {id(baseline), id(image)} | {id(v[1]) for v in witnesses.values()} | {id(v[1]) for v in before_witnesses.values()}
@@ -821,6 +833,8 @@ def actual_events(frames, initial, confirmed_position=None, turn_boundaries=Fals
                                      moving_piece_ids=tuple(p.id for p in current.pieces if (p.square.file, p.square.rank) in source_started))
             else:
                 fallback = None
+    if inference_active is not None and inference_active():
+        return
     if confirmed_position is not None:
         reference = confirmed_position()
         if reference is not None:
@@ -840,12 +854,14 @@ def actual_events(frames, initial, confirmed_position=None, turn_boundaries=Fals
                          moving_piece_ids=tuple(p.id for p in current.pieces if (p.square.file, p.square.rank) in source_started))
 
 
-def backfill_interval(source, start_s, end_s, calibration, before, expected, on_frame=None, motion_active=False, motion_reference_s=None):
+def backfill_interval(source, start_s, end_s, calibration, before, expected, on_frame=None, motion_active=False,
+                      motion_reference_s=None, motion_reference_calibration=None):
     from .initial_observation import observe_initial_board
     from .board_motion import BoardMotion
     timestamps = {}
     def frames():
-        motion = BoardMotion(calibration, active=motion_active) if calibration is not None else None
+        motion = BoardMotion(calibration, active=motion_active,
+                             reference_calibration=motion_reference_calibration) if calibration is not None else None
         if motion is not None and motion_reference_s is not None and motion_reference_s < start_s:
             for reference_time, reference_frame in iter_frames(source, motion_reference_s, motion_reference_s + .2):
                 motion.update(reference_time, reference_frame)
@@ -887,7 +903,7 @@ def backfill_interval(source, start_s, end_s, calibration, before, expected, on_
 
 
 def analyze_actual(task, store, vision):
-    from .analysis import read_board_cells
+    from .analysis import read_board_cells, _occupied_squares
     from .piece_classifier import local_piece_classifier
     from .scanning import VideoScan, scan_video
     initializer = vision
@@ -994,8 +1010,9 @@ def analyze_actual(task, store, vision):
         tracking_calibration = task.resume_calibration if task.resume_video_s is not None and task.resume_calibration else task.calibration
         calibration_changes = []
         def motion_at(time_s):
-            return next(((calibration, active, reference_s) for changed_s, calibration, active, reference_s in reversed(calibration_changes)
-                         if changed_s <= time_s + 1e-6), (tracking_calibration, False, None))
+            return next(((calibration, active, reference_s, reference_calibration)
+                         for changed_s, calibration, active, reference_s, reference_calibration in reversed(calibration_changes)
+                         if changed_s <= time_s + 1e-6), (tracking_calibration, False, None, None))
         frame_times = {}
         last_evidence_s = task.start_s
         def boards():
@@ -1060,7 +1077,8 @@ def analyze_actual(task, store, vision):
                                 tracking_calibration = refined
                     from .board_motion import BoardMotion
                     motion = BoardMotion(tracking_calibration, active=bool(task.resume_video_s is not None
-                        and task.resume_calibration is not None and task.resume_motion_active))
+                        and task.resume_calibration is not None and task.resume_motion_active),
+                        reference_calibration=task.resume_motion_reference_calibration if task.resume_video_s is not None else None)
                     if (task.resume_video_s is not None and task.resume_motion_reference_s is not None and task.resume_calibration is not None
                             and task.resume_motion_reference_s < time_s):
                         for reference_time, reference_frame in iter_frames(source, task.resume_motion_reference_s,
@@ -1070,12 +1088,14 @@ def analyze_actual(task, store, vision):
                     elif alignment_frame is not frame:
                         motion.update(alignment_time, alignment_frame)
                     tracking_calibration = motion.update(time_s, frame)
-                    calibration_changes.append((time_s, tracking_calibration, motion.active, motion.reference_s))
+                    calibration_changes.append((time_s, tracking_calibration, motion.active, motion.reference_s, motion.reference_calibration))
                 task.analysis_stats.scanned_frames += 1
                 task.run_stats.scanned_frames += 1
                 task.processed_video_s = max(task.start_s, time_s)
                 if monotonic() - last_saved > 1:
-                    task.stage = '延伸选区末手，等待最终落点' if time_s > task.end_s else '跟踪棋子并核对整体局面'
+                    task.stage = ('延伸选区末手，等待最终落点' if time_s > task.end_s else
+                                  f'追踪失去同步，正在恢复：{task.tracking_message}' if task.tracking_state == 'recovering' else
+                                  '跟踪棋子并核对整体局面')
                     task.run_stats.elapsed_seconds = monotonic() - started
                     scan.flush()
                     task = store.save_progress(task)
@@ -1099,8 +1119,9 @@ def analyze_actual(task, store, vision):
                                 except StopIteration:
                                     return
                                 calibration = motion.update(time_s, frame)
-                                if calibration is not calibration_changes[-1][1]:
-                                    calibration_changes.append((time_s, calibration, motion.active, motion.reference_s))
+                                if calibration is not calibration_changes[-1][1] or motion.reference_s != calibration_changes[-1][3]:
+                                    calibration_changes.append((time_s, calibration, motion.active, motion.reference_s,
+                                                                motion.reference_calibration))
                                 yield time_s, frame, monotonic() - decoding, {
                                     (piece.square.file, piece.square.rank): piece.color for piece in current.pieces}, calibration
                         finally:
@@ -1116,17 +1137,112 @@ def analyze_actual(task, store, vision):
         recovery_reader = None
         visual_recovery = None
         reanchor_reader = None
+        inference, inference_prefix, inference_next_s, inference_signature = None, 0, 0, None
+        inference_fallback_s, inference_reanchored = 0, False
+        inference_tail_signature, inference_tail_hits = None, 0
+        inference_tail_source, inference_empty_hits, inference_departed = None, {}, set()
         if source.is_file() and os.getenv('VISION_FUSION') == '1':
             from .tracking_recovery import VisualRecovery
             from .fusion import local_fusion_classifier
             detector = local_fusion_classifier().detector
             visual_recovery = VisualRecovery(detector.readings)
+            if task.resume_video_s is not None and any(r.status == 'tentative' and r.move is None
+                    and r.predicted_position is not None for r in task.moves):
+                from .move_inference import MoveInference
+                inference = MoveInference(current, begin, origin_uncertain=True)
+                inference.residual_next_s = max((r.tracking_anchor_s or r.video_end_s) + 10
+                    for r in task.moves if r.status == 'tentative' and r.move is None
+                    and r.predicted_position is not None)
+                inference_prefix = len(task.moves)
+                inference_fallback_s = begin + 1
             def read_anchor(time_s, image, reference):
+                nonlocal inference, inference_prefix, inference_next_s, inference_signature, inference_fallback_s, inference_reanchored
+                nonlocal inference_tail_signature, inference_tail_hits
+                nonlocal inference_tail_source, inference_empty_hits, inference_departed
+                if inference is not None:
+                    if time_s < inference_next_s:
+                        return None
+                    inference_next_s = time_s + .4
+                    cells = _tracking_cells(image)
+                    inference_departed.difference_update(square for square, color in cells.items() if color is not None)
+                    # 同子可能属于下一回合；只延伸选区内已直接观察到离盘的动作。
+                    if time_s > task.end_s and inference_tail_source not in inference_departed:
+                        from .analysis import VideoEvent
+                        return VideoEvent(time_s, [], selection_complete=True)
+                    if time_s <= task.end_s and time_s >= inference_fallback_s:
+                        visual_recovery.request(time_s)
+                        before_checks, checking = visual_recovery.check_count, monotonic()
+                        candidate = visual_recovery.observe(time_s, image, reference, cells,
+                            reference_image=reference_image,
+                            reference_time_s=frame_times.get(id(reference_image), (None, None))[1])
+                        checks = visual_recovery.check_count - before_checks
+                        if checks:
+                            seconds = monotonic() - checking
+                            task.run_stats.reanchor_checks += checks
+                            task.analysis_stats.reanchor_checks += checks
+                            task.run_stats.reanchor_seconds += seconds
+                            task.analysis_stats.reanchor_seconds += seconds
+                        inference_fallback_s = visual_recovery.next_check_s if visual_recovery.requested else time_s + 10
+                        if candidate is not None and not inference.origin_uncertain:
+                            from .analysis import VideoEvent
+                            inference, inference_reanchored = None, True
+                            return VideoEvent(time_s, [item[1] for item in visual_recovery.evidence], position=candidate,
+                                image_times_s=tuple(item[0] for item in visual_recovery.evidence), tracking_anchor=True,
+                                board_check=visual_recovery.board_check)
+                    records = inference.observe(time_s, cells, tail_only=time_s > task.end_s)
+                    if time_s <= task.end_s:
+                        inference_empty_hits = {square: inference_empty_hits.get(square, 0) + 1
+                            for square, color in cells.items() if color is None}
+                        inference_departed.update(square for square, hits in inference_empty_hits.items() if hits >= 2)
+                        inference_tail_source = (records[-1].move.source.file, records[-1].move.source.rank) if records else None
+                    position = records[-1].predicted_position if records else inference.before
+                    if time_s <= task.end_s and inference.recovery_due(time_s, cells, position):
+                        checking = monotonic()
+                        classifier = local_fusion_classifier()
+                        candidates = classifier.recognize_position([image], reference=position, actual=True)
+                        if not candidates and (classifier.last_response or {}).get('draft_position'):
+                            candidates = [Position.model_validate(classifier.last_response['draft_position'])]
+                        candidate = next((p for observed in candidates
+                            if (p := inference.constrain_recovery(observed, cells)) is not None), None)
+                        seconds = monotonic() - checking
+                        task.run_stats.reanchor_checks += 1
+                        task.analysis_stats.reanchor_checks += 1
+                        task.run_stats.reanchor_seconds += seconds
+                        task.analysis_stats.reanchor_seconds += seconds
+                        if candidate is not None:
+                            from .analysis import VideoEvent
+                            return VideoEvent(time_s, [image], position=candidate, image_times_s=(time_s,), inferred_anchor=True)
+                    if time_s > task.end_s:
+                        if not records:
+                            from .analysis import VideoEvent
+                            return VideoEvent(time_s, [], selection_complete=True)
+                        expected = {(p.square.file, p.square.rank): p.color for p in position.pieces}
+                        settled = len(cells) == 90 and all(expected.get(s) == c for s, c in cells.items())
+                        opponent = next((after for _, after in inference._successors(position, cells, require_visible_landing=True)
+                            if inference._penalty(after, cells) < inference._penalty(position, cells)), None)
+                        tail_signature = board_signature(opponent or position) if settled or opponent is not None else None
+                        inference_tail_hits = inference_tail_hits + 1 if tail_signature is not None and tail_signature == inference_tail_signature else 1
+                        inference_tail_signature = tail_signature
+                        if tail_signature is not None and inference_tail_hits >= 2:
+                            from .analysis import VideoEvent
+                            return VideoEvent(time_s, [], selection_complete=True)
+                    signature = (tuple((r.move.piece_id, r.move.source.file, r.move.source.rank,
+                        r.move.target.file, r.move.target.rank, r.status) for r in records), inference.evidence_ready)
+                    if signature == inference_signature:
+                        return None
+                    inference_signature = signature
+                    from .analysis import VideoEvent
+                    return VideoEvent(time_s, [image], position=position, image_times_s=(time_s,),
+                                      action_start_s=records[-1].video_start_s if records else task.start_s,
+                                      inferred_records=records)
                 if not visual_recovery.requested or time_s < visual_recovery.next_check_s:
                     return None
                 before_checks = visual_recovery.check_count
                 checking = monotonic()
-                candidate = visual_recovery.observe(time_s, image, reference, _tracking_cells(image))
+                candidate = visual_recovery.observe(time_s, image, reference, _tracking_cells(image),
+                    reference_image=reference_image,
+                    reference_time_s=frame_times.get(id(reference_image), (None, None))[1])
+                task.tracking_message = visual_recovery.reason or '正在等待可交叉核对的清晰画面'
                 checks = visual_recovery.check_count - before_checks
                 if checks > 0:
                     seconds = monotonic() - checking
@@ -1135,10 +1251,22 @@ def analyze_actual(task, store, vision):
                     task.run_stats.reanchor_seconds += seconds
                     task.analysis_stats.reanchor_seconds += seconds
                 if candidate is None:
+                    if not visual_recovery.requested:
+                        task.tracking_state, task.tracking_since_s, task.tracking_message = 'tracking', None, None
+                    elif visual_recovery.attempts >= 2:
+                        from .move_inference import MoveInference
+                        origin = rules.before if rules is not None else reference
+                        start_s = (task.moves[-1].action_end_s or task.moves[-1].video_end_s) if task.moves else task.start_s
+                        inference = MoveInference(origin, start_s)
+                        inference_tail_source, inference_empty_hits, inference_departed = None, {}, set()
+                        inference_prefix = len(task.moves)
+                        inference_fallback_s = time_s + 1
+                        return read_anchor(time_s, image, reference)
                     return None
                 from .analysis import VideoEvent
                 return VideoEvent(time_s, [item[1] for item in visual_recovery.evidence], position=candidate,
-                    image_times_s=tuple(item[0] for item in visual_recovery.evidence), tracking_anchor=True)
+                    image_times_s=tuple(item[0] for item in visual_recovery.evidence),
+                    tracking_anchor=not visual_recovery.incremental, board_check=visual_recovery.board_check)
             reanchor_reader = read_anchor
             previous_readings = {}
             def recover_occupied_cells(image, reference):
@@ -1168,10 +1296,12 @@ def analyze_actual(task, store, vision):
             events = actual_events(boards(), current, lambda: current, turn_boundaries=True, selected_end_s=task.end_s,
                                    confirmed_image=lambda: reference_image,
                                    turn_origin=lambda: rules.before if rules.pending is not None and len(rules.touched) == 1 else None,
-                                   recovery_reader=recovery_reader, reanchor_reader=reanchor_reader)
+                                   recovery_reader=recovery_reader, reanchor_reader=reanchor_reader,
+                                   inference_active=lambda: inference is not None)
         else:
             events = actual_events(boards(), current, lambda: current, selected_end_s=task.end_s,
-                                   confirmed_image=lambda: reference_image, recovery_reader=recovery_reader, reanchor_reader=reanchor_reader)
+                                   confirmed_image=lambda: reference_image, recovery_reader=recovery_reader, reanchor_reader=reanchor_reader,
+                                   inference_active=lambda: inference is not None)
         selected_last_piece = None
         events = selected_events(events, current, task.end_s, confirmed_position=lambda: current,
                                  confirmed_piece=lambda: selected_last_piece)
@@ -1217,7 +1347,94 @@ def analyze_actual(task, store, vision):
                 if not (folder / name).exists():
                     save_image(folder / name, image)
                 ids.append(name)
+            if event.inferred_anchor:
+                from .move_inference import MoveInference
+                after = reconcile_position(current, event.position, PositionHistory([current]))
+                task.moves.append(MoveRecord(index=len(task.moves) + 1, video_start_s=event.time_s,
+                    video_end_s=event.time_s, action_end_s=event.time_s, status='tentative', change_type='review',
+                    position_before=current, predicted_position=after, tracking_anchor=after,
+                    tracking_anchor_s=event.time_s, evidence_ids=ids, evidence_times_s=times,
+                    timing_status='uncertain', reason='连续完整占位与前序推断存在差异；已显示最大概率恢复局面，棋子身份和中间操作仍需核对'))
+                current, reference_image, seen_cells, selected_last_piece = after, images[-1], {}, None
+                task.pending_turn = None
+                residual_next_s = inference.residual_next_s
+                inference = MoveInference(after, event.time_s, origin_uncertain=True)
+                inference.residual_next_s = residual_next_s
+                inference_tail_source, inference_empty_hits, inference_departed = None, {}, set()
+                inference_prefix, inference_signature = len(task.moves), None
+                inference_fallback_s = event.time_s + 1
+                visual_recovery.reset()
+                task.tracking_state, task.tracking_message = 'recovering', '已显示推断恢复局面，前序差异保留待核对'
+                task.stage = '已恢复当前候选局面，继续分析后续走棋'
+                task.recognition_video_s = max(task.recognition_video_s, event.time_s)
+                task.recognition_events += 1
+                task.run_stats.elapsed_seconds = monotonic() - started
+                scan.update(task)
+                task = store.save_analysis(task)
+                from .recovery import save_boundary_checkpoint
+                save_boundary_checkpoint(store, task, event.time_s, current, *motion_at(event.time_s))
+                continue
+            if event.inferred_records is not None:
+                prior = {tuple((r.move.piece_id, r.move.source.file, r.move.source.rank,
+                    r.move.target.file, r.move.target.rank)): r for r in task.moves[inference_prefix:] if r.move}
+                records = []
+                for predicted in event.inferred_records:
+                    record = predicted.model_copy(deep=True)
+                    record.index += inference_prefix
+                    record.move.index = record.index
+                    record.candidates = [record.move]
+                    record.depends_on_steps = [i + inference_prefix for i in record.depends_on_steps]
+                    if inference.origin_uncertain:
+                        record.depends_on_steps.insert(0, inference_prefix)
+                    key = (record.move.piece_id, record.move.source.file, record.move.source.rank,
+                           record.move.target.file, record.move.target.rank)
+                    old = prior.get(key)
+                    witnesses = dict(zip(old.evidence_ids, old.evidence_times_s)) if old else {}
+                    if old is None or old.status != record.status or record.index == inference_prefix + len(event.inferred_records):
+                        witnesses.update(zip(ids, times))
+                    record.evidence_ids, record.evidence_times_s = list(witnesses), list(witnesses.values())
+                    records.append(record)
+                if not records:
+                    records.append(MoveRecord(index=inference_prefix + 1, video_start_s=inference.start_s,
+                        video_end_s=event.time_s, status='needs_review', position_before=current,
+                        change_type='review', evidence_ids=ids, evidence_times_s=times,
+                        reason='当前证据尚未确定走法，保留原局面并继续核对', timing_status='uncertain'))
+                task.moves = task.moves[:inference_prefix] + records
+                task.pending_turn = None
+                current = event.position
+                selected_last_piece = records[-1].move.piece_id if records[-1].move else None
+                reference_image, seen_cells = images[-1], {}
+                task.tracking_state, task.tracking_message = 'recovering', '已展示最高匹配走法，正在用后续画面核对推断'
+                task.stage = '按历史身份与合法走法继续推断；待核对步骤已标记'
+                task.recognition_video_s = max(task.recognition_video_s, event.time_s)
+                task.recognition_events += 1
+                task.run_stats.elapsed_seconds = monotonic() - started
+                scan.update(task)
+                task = store.save_analysis(task)
+                continue
             if event.tracking_anchor:
+                if inference_reanchored:
+                    if rules is not None:
+                        rules = TurnReplay(task, current)
+                    inference_reanchored = False
+                if event.board_check is not None and _occupied_squares(current) == _occupied_squares(event.position):
+                    task.moves.append(MoveRecord(index=len(task.moves) + 1,
+                        video_start_s=min((t for t in times if t is not None), default=event.time_s),
+                        video_end_s=event.time_s, status='needs_review', change_type='review', position_before=current,
+                        observed_positions=[event.position], evidence_ids=ids, evidence_times_s=times,
+                        board_check=event.board_check, reason=event.board_check.reason, timing_status='uncertain'))
+                    if rules is not None:
+                        rules.task = task
+                        rules.sync_pending()
+                    task.tracking_state, task.tracking_since_s, task.tracking_message = 'tracking', None, None
+                    task.stage = '身份分类冲突已保留审核，继续按已知局面跟踪'
+                    task.recognition_video_s = max(task.recognition_video_s, event.time_s)
+                    task.recognition_events += 1
+                    task.run_stats.elapsed_seconds = monotonic() - started
+                    scan.update(task)
+                    task = store.save_analysis(task)
+                    continue
+                task.tracking_state, task.tracking_since_s, task.tracking_message = 'tracking', None, None
                 task.run_stats.reanchors += 1
                 task.analysis_stats.reanchors += 1
                 after = reconcile_position(current, event.position, PositionHistory([current]))
@@ -1237,6 +1454,10 @@ def analyze_actual(task, store, vision):
                     pending_review.index = len(task.moves) + 1
                     task.moves.append(pending_review)
                     current, pending_review, last_end = after, None, event.time_s
+                if event.board_check is not None:
+                    record = task.moves[-1]
+                    record.board_check = event.board_check
+                    record.reason += '；' + event.board_check.reason
                 history = PositionHistory([current])
                 reference_image, selected_last_piece = images[-1], None
                 last_verified_s = event.time_s
@@ -1252,6 +1473,7 @@ def analyze_actual(task, store, vision):
                 from .recovery import save_boundary_checkpoint
                 save_boundary_checkpoint(store, task, event.time_s, current, *motion_at(event.time_s))
                 continue
+            previous_reference_image, previous_seen_cells = reference_image, seen_cells
             positions = [event.position] if event.position is not None else []
             if not positions and not event.review_reason and vision is not None:
                 task.stage = '结合已知局面与前后画面确认变化'
@@ -1322,10 +1544,11 @@ def analyze_actual(task, store, vision):
                                 task = store.save_progress(task)
                                 last_saved = monotonic()
                         backfill_started = monotonic()
-                        backfill_calibration, backfill_motion_active, backfill_reference_s = motion_at(last_verified_s)
+                        backfill_calibration, backfill_motion_active, backfill_reference_s, backfill_reference_calibration = motion_at(last_verified_s)
                         recovered = backfill_interval(source, last_verified_s, backfill_end_s,
                                                       backfill_calibration, current, observed, check_backfill,
-                                                      motion_active=backfill_motion_active, motion_reference_s=backfill_reference_s)
+                                                      motion_active=backfill_motion_active, motion_reference_s=backfill_reference_s,
+                                                      motion_reference_calibration=backfill_reference_calibration)
                         backfill_seconds = monotonic() - backfill_started
                         task.analysis_stats.backfill_seconds += backfill_seconds
                         task.run_stats.backfill_seconds += backfill_seconds
@@ -1347,6 +1570,10 @@ def analyze_actual(task, store, vision):
                     seen_cells.update({s: (color, images[-1], after_time) for s, color in after_cells.items()})
             if visual_recovery is not None and (event.review_reason or audit is not None and audit.status == 'conflict'):
                 visual_recovery.request(event.time_s)
+                task.tracking_state = 'recovering'
+                if task.tracking_since_s is None:
+                    task.tracking_since_s = event.time_s
+                task.tracking_message = event.review_reason or audit.reason
             record_payloads_before = None
             if rules is not None:
                 rules.task = task
@@ -1354,12 +1581,22 @@ def analyze_actual(task, store, vision):
                     if task.initial_turn_known and event.time_s >= task.start_s:
                         record_payloads_before = tuple(r.model_dump_json(by_alias=True) for r in task.moves)
                     after = reconcile_position(current, next(iter(unique.values())), history)
-                    if visual_recovery is not None and board_signature(after) != board_signature(current):
-                        visual_recovery.reset()
                     rules.observe(after, event.time_s, ids, event.action_start_s, board_check=audit)
-                    current = rules.observed
+                    current = rules.tracking_position
+                    if board_signature(current) == board_signature(after):
+                        if visual_recovery is not None:
+                            visual_recovery.reset()
+                            task.tracking_state, task.tracking_since_s, task.tracking_message = 'tracking', None, None
+                    else:
+                        reference_image, seen_cells = previous_reference_image, previous_seen_cells
+                        if visual_recovery is not None:
+                            visual_recovery.request(event.time_s)
+                            task.tracking_state = 'recovering'
+                            task.tracking_since_s = task.tracking_since_s or event.time_s
+                            task.tracking_message = '临时候选尚未通过核验，继续从可靠局面检查后续画面'
                     history.append(current)
-                    last_verified_s = event.time_s
+                    if board_signature(current) == board_signature(after):
+                        last_verified_s = event.time_s
                 elif event.time_s >= task.start_s:
                     rules.uncertain(event.time_s, list(unique.values()), ids, event.review_reason)
                 rules.sync_pending()
@@ -1368,6 +1605,7 @@ def analyze_actual(task, store, vision):
                 after = reconcile_position(current, next(iter(unique.values())), history)
                 if visual_recovery is not None and board_signature(after) != board_signature(current):
                     visual_recovery.reset()
+                    task.tracking_state, task.tracking_since_s, task.tracking_message = 'tracking', None, None
                 if event.time_s < task.start_s:
                     task.initial_position = after
                 else:
@@ -1425,7 +1663,9 @@ def analyze_actual(task, store, vision):
                 from .recovery import save_boundary_checkpoint
                 checkpoint_s = times[-1] if times and times[-1] is not None else event.time_s
                 save_boundary_checkpoint(store, task, checkpoint_s, current, *motion_at(checkpoint_s))
-        if rules is not None:
+        if inference is not None:
+            task.pending_turn = None
+        elif rules is not None:
             rules.task = task
             rules.end(max(task.end_s, last_evidence_s))
         elif pending_review is not None:
@@ -1458,6 +1698,11 @@ def analyze_actual(task, store, vision):
         task.status, task.stage, task.error = 'failed', '分析未完成', str(exc)
         store.save_analysis(task)
     except Exception as exc:
+        import traceback
+        diagnostic = {'exception_type': type(exc).__name__, 'video_s': task.processed_video_s,
+            'frames': [{'file': frame.filename, 'line': frame.lineno, 'function': frame.name}
+                       for frame in traceback.extract_tb(exc.__traceback__)]}
+        (folder.parent / 'analysis-error.json').write_text(json.dumps(diagnostic, ensure_ascii=False, indent=2), encoding='utf8')
         if rules is not None:
             rules.task = task
             rules.interrupt()

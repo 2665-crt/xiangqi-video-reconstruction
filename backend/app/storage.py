@@ -108,7 +108,8 @@ class TaskStore:
 
     def save_progress(self, task: Task) -> Task:
         fields = ('processed_video_s', 'stage', 'scan_progress_s', 'scan_complete', 'scan_events',
-                  'recognition_video_s', 'recognition_events', 'pending_event_count', 'evidence_end_s', 'usage')
+                  'recognition_video_s', 'recognition_events', 'pending_event_count', 'evidence_end_s', 'usage',
+                  'tracking_state', 'tracking_since_s', 'tracking_message')
         with closing(sqlite3.connect(self.db)) as con, con:
             con.execute('BEGIN IMMEDIATE')
             row = con.execute("SELECT revision, json_extract(payload, '$.status'), json_extract(payload, '$.recovery') FROM tasks WHERE id=?", (task.id,)).fetchone()

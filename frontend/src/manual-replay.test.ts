@@ -44,3 +44,16 @@ it('旧规则任务人工校正后，视频对照仍能定位前缀外的已知�
   } as Task;
   expect(stepAtVideoTime(legacy, 4)).toBe(3);
 });
+
+it('手动插入后的时间可与步骤顺序不同，视频按最近落点定位', () => {
+  const edited = { ...task, moves: [
+    { ...task.moves[0], video_end_s: 4, manual_override: true },
+    { ...task.moves[2], index: 2, video_end_s: 1 },
+    { ...task.moves[2], video_end_s: 3 },
+  ] } as Task;
+  expect(stepAtVideoTime(edited, .5)).toBe(0);
+  expect(stepAtVideoTime(edited, 1.5)).toBe(2);
+  expect(stepAtVideoTime(edited, 3.5)).toBe(3);
+  expect(stepAtVideoTime(edited, 4.5)).toBe(1);
+  expect(nextStep(edited, 1)).toBe(2);
+});

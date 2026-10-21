@@ -55,8 +55,8 @@ def test_compatible_frames_can_complete_coverage_but_conflicting_frames_cannot()
     tracker = recovery(lambda image: readings(final))
     tracker.request(1)
     left, right = cells(final), cells(final)
-    left.pop((8, 9))
-    right.pop((7, 9))
+    left.pop((4, 4))
+    right.pop((5, 4))
     assert tracker.observe(1, None, before, left) is None
     assert tracker.observe(2, None, before, right) is not None
     tracker = recovery(lambda image: readings(final))
@@ -101,6 +101,74 @@ def test_backoff_still_allows_a_pair_of_complementary_partially_visible_frames()
     assert tracker.observe(13, final, before, right) is not None
 
 
+def test_repeated_moderate_detection_recovers_without_accepting_one_weak_frame():
+    before = opening_position()
+    final = moved(moved(before, 'red_rook_0', 0, 8), 'black_rook_0', 0, 1)
+    detected = readings(final)
+    detected[(0, 8)]['confidence'] = .7
+    tracker = recovery(lambda image: detected)
+    tracker.request(0)
+    assert tracker.observe(0, None, before, cells(final)) is None
+    assert tracker.observe(1, None, before, cells(final)) is None
+    anchor = tracker.observe(2, None, before, cells(final))
+    assert anchor is not None
+    assert board_signature(anchor) == board_signature(final)
+
+
+def test_compatible_three_frame_coverage_can_recover_after_backoff():
+    before = opening_position()
+    final = moved(moved(before, 'red_rook_0', 0, 8), 'black_rook_0', 0, 1)
+    tracker = recovery(lambda image: readings(final) if image else {})
+    tracker.request(0)
+    for t in (0, 1, 2):
+        assert tracker.observe(t, None, before, cells(before)) is None
+    observations = []
+    for absent in (((4, 4), (5, 4)), ((5, 4), (6, 4)), ((4, 4), (6, 4))):
+        visible = cells(final)
+        for square in absent:
+            visible.pop(square)
+        observations.append(visible)
+    assert tracker.observe(12, True, before, observations[0]) is None
+    assert tracker.observe(13, True, before, observations[1]) is None
+    anchor = tracker.observe(14, True, before, observations[2])
+    assert anchor is not None
+    assert board_signature(anchor) == board_signature(final)
+
+
+def test_weak_or_conflicting_classes_cannot_be_promoted_by_repetition():
+    before = opening_position()
+    final = moved(moved(before, 'red_rook_0', 0, 8), 'black_rook_0', 0, 1)
+    detected = readings(final)
+    detected[(0, 8)]['confidence'] = .3
+    tracker = recovery(lambda image: detected)
+    tracker.request(0)
+    for n in range(31):
+        assert tracker.observe(n, None, before, cells(final)) is None
+
+
+@pytest.mark.parametrize('identity,source,target', [('red_rook_0', (0, 8), (0, 7)),
+                                                  ('red_rook_8', (8, 9), (8, 8))])
+def test_third_frame_occluded_new_move_cannot_reuse_an_older_recovery_anchor(identity, source, target):
+    before = opening_position()
+    first = moved(moved(before, 'red_rook_0', 0, 8), 'black_rook_0', 0, 1)
+    following = moved(first, identity, *target)
+    def detect(position):
+        result = readings(position)
+        result[(4, 9)]['confidence'] = .7
+        if position is following:
+            result.pop(target)
+        return result
+    tracker = recovery(detect)
+    tracker.request(0)
+    assert tracker.observe(0, first, before, cells(first)) is None
+    assert tracker.observe(1, first, before, cells(first)) is None
+    covered = cells(following)
+    covered.pop(source)
+    covered.pop(target)
+    assert tracker.observe(2, following, before, covered) is None
+    assert tracker.requested is True
+
+
 def test_reanchor_seals_gap_and_allows_two_following_automatic_moves():
     before = opening_position()
     anchor = moved(moved(before, 'red_rook_0', 0, 8), 'black_rook_0', 0, 1)
@@ -128,6 +196,22 @@ def test_reanchor_seals_gap_and_allows_two_following_automatic_moves():
     assert [r.status for r in validated.moves] == ['needs_review', 'auto_verified', 'auto_verified']
 
 
+def test_occlusion_after_reanchor_does_not_attach_anchor_to_an_untimed_review():
+    before = opening_position()
+    anchor = moved(moved(before, 'red_rook_0', 0, 8), 'black_rook_0', 0, 1)
+    task = task_for(before)
+    replay = TurnReplay(task, before)
+    replay.reanchor(anchor, 5, ['clear.jpg'], [5])
+    replay.uncertain(5.2, [], ['hand.jpg'], '局部遮挡，等待核对')
+    replay.observe(anchor, 5.3, ['clear-again.jpg'])
+    assert len(task.moves) == 2 and task.moves[-1].tracking_anchor is None
+    black = moved(anchor, 'black_rook_8', 8, 1)
+    replay.observe(black, 7, ['black.jpg'], 6)
+    assert task.moves[0].tracking_anchor.side_to_move == 'black'
+    assert task.moves[-1].tracking_anchor is None
+    assert sum(r.tracking_anchor is not None for r in task.moves) == 1
+
+
 def test_reanchor_keeps_completed_move_and_does_not_turn_gap_into_a_move():
     before = opening_position()
     first = moved(before, 'red_rook_0', 0, 8)
@@ -150,7 +234,7 @@ def test_reanchor_keeps_completed_move_and_does_not_turn_gap_into_a_move():
 def test_pipeline_persists_anchor_and_auto_confirms_after_unresolved_history(tmp_path, monkeypatch, rules_enabled):
     from app import actual
     from app.analysis import VideoEvent, analyze_task
-    from app.schemas import Calibration
+    from app.schemas import BoardCheck, Calibration
     from app.storage import TaskStore
     from test_tracking import board_image
     before = opening_position()
@@ -160,7 +244,9 @@ def test_pipeline_persists_anchor_and_auto_confirms_after_unresolved_history(tmp
     events = [VideoEvent(0, [board_image(before)], position=before),
               VideoEvent(2, [board_image(before), board_image(anchor)], True, position=anchor, review_reason='失配'),
               VideoEvent(5, [board_image(anchor), board_image(anchor)], position=anchor,
-                         image_times_s=(4, 5), tracking_anchor=True),
+                         image_times_s=(4, 5), tracking_anchor=True,
+                         board_check=BoardCheck(status='partial', visible_before=90, visible_after=90,
+                                                reason='连续分类与历史身份冲突，请人工核对')),
               VideoEvent(7, [board_image(anchor), board_image(black)], position=black, action_start_s=6),
               VideoEvent(9, [board_image(black), board_image(red)], position=red, action_start_s=8)]
     monkeypatch.setattr(actual, 'actual_events', lambda *a, **k: iter(events))
@@ -176,6 +262,8 @@ def test_pipeline_persists_anchor_and_auto_confirms_after_unresolved_history(tmp
     assert [r.status for r in result.moves] == ['needs_review', 'auto_verified', 'auto_verified']
     assert result.moves[0].tracking_anchor_s == 5
     assert result.moves[0].position_after is None
+    assert result.moves[0].board_check.status == 'partial'
+    assert '身份冲突' in result.moves[0].reason
     checked = actual.revalidate_actual(result)
     assert [r.status for r in checked.moves] == ['needs_review', 'auto_verified', 'auto_verified']
     assert [r.move.piece_id for r in checked.moves[1:]] == ['black_rook_8', 'red_rook_8']

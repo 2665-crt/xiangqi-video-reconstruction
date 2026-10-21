@@ -15,7 +15,8 @@ def test_old_runs_do_not_report_unmeasured_backfills_as_zero():
 def run_events(tmp_path, monkeypatch, events, recover=None, end=10):
     calls = []
 
-    def backfill(source, start, stop, calibration, before, expected, on_frame=None, motion_active=False, motion_reference_s=None):
+    def backfill(source, start, stop, calibration, before, expected, on_frame=None, motion_active=False,
+                 motion_reference_s=None, motion_reference_calibration=None):
         calls.append((start, stop))
         if on_frame is not None:
             on_frame(start)

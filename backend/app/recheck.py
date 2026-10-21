@@ -1,15 +1,17 @@
 import hashlib
+import os
 import weakref
 import av
+from collections import OrderedDict
 from pathlib import Path
 from time import monotonic
 from uuid import uuid4
 
-from .actual import actual_events, reconcile_position
+from .actual import _tracking_cache, _tracking_cells, actual_events, reconcile_position, snapshot_record
+from .board_motion import BoardMotion
 from .board_evidence import check_transition
 from .calibration import rectify_board
 from .chess import board_signature
-from .initial_observation import observe_initial_board
 from .schemas import MoveRecord, RecheckState, Task, VideoMetadata
 from .storage import RevisionConflict, TaskStore
 from .turns import TurnReplay, renumber_records, replay_corrections
@@ -72,15 +74,54 @@ def trace_range(source, calibration, before, start_s, end_s, evidence_dir, on_pr
         rate = container.streams.video[0].average_rate or container.streams.video[0].guessed_rate
         frame_tolerance = 1.5 / float(rate) if rate else .05
 
-    def reader(image, reference=None):
-        return observe_initial_board(image)[0]
+    reader = _tracking_cells
+    visual_recovery = None
+    detector = None
+    recovery_reader = reanchor_reader = None
+    if os.getenv('VISION_FUSION') == '1':
+        from .analysis import VideoEvent
+        from .fusion import local_fusion_classifier
+        from .tracking_recovery import VisualRecovery
+        detector = local_fusion_classifier().detector
+        visual_recovery = VisualRecovery(detector.deep_readings)
+        previous_readings = {}
+
+        def recover_cells(image, reference):
+            nonlocal previous_readings
+            recovered, observed = {}, {}
+            occupied = {(p.square.file, p.square.rank): f'{p.color}_{p.kind}' for p in reference.pieces}
+            for square, reading in detector.readings(image).items():
+                probabilities = reading['class_probabilities']
+                label = max(probabilities, key=probabilities.get)
+                if reading['confidence'] >= .85 and probabilities[label] >= .8:
+                    box = reading['bbox']
+                    center = (box[0] + box[2]) / 2, (box[1] + box[3]) / 2
+                    observed[square] = label, center
+                    previous = previous_readings.get(square)
+                    if (occupied.get(square) == label or previous is not None and previous[0] == label
+                            and max(abs(a - b) for a, b in zip(center, previous[1])) <= 20):
+                        recovered[square] = label.split('_', 1)[0]
+            previous_readings = observed
+            return recovered
+
+        def read_anchor(time_s, image, reference):
+            if not visual_recovery.requested or time_s < visual_recovery.next_check_s:
+                return None
+            candidate = visual_recovery.observe(time_s, image, reference, reader(image, reference))
+            if candidate is not None:
+                return VideoEvent(time_s, [item[1] for item in visual_recovery.evidence], position=candidate,
+                    image_times_s=tuple(item[0] for item in visual_recovery.evidence), tracking_anchor=True)
+
+        recovery_reader, reanchor_reader = recover_cells, read_anchor
 
     def boards():
         nonlocal count, latest, first_image
+        motion = BoardMotion(calibration)
         for t, frame in iter_frames(source, start_s, end_s):
             if t >= end_s:
                 break
-            image = rectify_board(frame, calibration, margin=100)
+            image = rectify_board(frame, motion.update(t, frame), margin=100)
+            image.setflags(write=False)
             count += 1
             latest = (t, image)
             if first_image is None:
@@ -94,8 +135,10 @@ def trace_range(source, calibration, before, start_s, end_s, evidence_dir, on_pr
 
     events = actual_events(boards(), before, lambda: current, turn_boundaries=True,
         cell_reader=reader, confirmed_image=lambda: reference_image,
-        turn_origin=lambda: replay.before if replay.pending is not None and len(replay.touched) == 1 else None)
+        turn_origin=lambda: replay.before if replay.pending is not None and len(replay.touched) == 1 else None,
+        recovery_reader=recovery_reader, reanchor_reader=reanchor_reader)
     local_classifier = None
+    observed_starts = {}
     for event in events:
         if event.moving_colors:
             replay.movement(event.moving_colors, event.last_clear_s if event.last_clear_s is not None else event.time_s,
@@ -108,7 +151,28 @@ def trace_range(source, calibration, before, start_s, end_s, evidence_dir, on_pr
                 save_image(evidence_dir / name, image)
             ids.append(name)
             times.append(timestamps[id(image)][1] if id(image) in timestamps else None)
+        if event.image_times_s:
+            times = list(event.image_times_s)
+        if event.tracking_anchor:
+            position = reconcile_position(current, event.position, [before, current])
+            action = snapshot_record(current, position, 1, 0, event.time_s).move
+            onset = observed_starts.get((action.piece_id, action.source.file, action.source.rank)) if action else None
+            check = check_transition(current, position, reader(reference_image, current),
+                reader(event.images[-1], position)) if reference_image is not None else None
+            if action is not None and onset is not None and check is not None and check.status != 'conflict':
+                check.backfilled = True
+                replay.observe(position, times[0], ids, onset, board_check=check)
+                replay.attach_evidence(check, ids, times)
+            else:
+                replay.reanchor(position, event.time_s, ids, times)
+            current, reference_image = replay.observed, event.images[-1]
+            observed_starts.clear()
+            continue
         position = event.position
+        if position is not None and event.action_start_s is not None:
+            action = snapshot_record(current, position, 1, 0, event.time_s).move
+            if action is not None:
+                observed_starts.setdefault((action.piece_id, action.source.file, action.source.rank), event.action_start_s)
         if position is None and not event.review_reason:
             if local_classifier is None:
                 from .vision import VisionClient
@@ -119,18 +183,40 @@ def trace_range(source, calibration, before, start_s, end_s, evidence_dir, on_pr
                 if len(unique) == 1:
                     position = reconcile_position(current, next(iter(unique.values())), [before, current])
         if position is None or event.review_reason:
+            if visual_recovery is not None:
+                visual_recovery.request(event.time_s)
             replay.uncertain(event.time_s, [position] if position is not None else [], ids,
                              event.review_reason or '逐帧检查发现无法确认的变化，请核对原视频')
             replay.attach_evidence(None, ids, times)
             continue
-        check = check_transition(current, position, reader(event.images[0]), reader(event.images[-1]))
+        check = event.board_check or check_transition(current, position,
+            reader(event.images[0], current), reader(event.images[-1], position))
         check.backfilled = True
+        if detector is not None and check.status == 'partial':
+            action = snapshot_record(current, position, 1, 0, event.time_s).move
+            if action is not None:
+                piece = next(p for p in current.pieces if p.id == action.piece_id)
+                reading = detector.deep_readings(event.images[-1]).get((action.target.file, action.target.rank))
+                probabilities = reading['class_probabilities'] if reading is not None else {}
+                label = f'{piece.color}_{piece.kind}'
+                if (reading is None or reading['confidence'] < .75 or probabilities.get(label, 0) < .95):
+                    visual_recovery.request(event.time_s)
+                    replay.uncertain(event.time_s, [], ids, '落点存在遮挡或棋子身份与跟踪结果不一致，继续逐帧复核')
+                    replay.attach_evidence(None, ids, times)
+                    continue
         if check.status == 'conflict':
+            if visual_recovery is not None:
+                visual_recovery.request(event.time_s)
             replay.uncertain(event.time_s, [position], ids, check.reason)
         else:
-            replay.observe(position, event.time_s, ids, event.action_start_s)
+            changed = board_signature(position) != board_signature(current)
+            replay.observe(position, event.time_s, ids, event.action_start_s, board_check=check)
             current = replay.observed
             reference_image = event.images[-1]
+            if visual_recovery is not None and changed:
+                visual_recovery.reset()
+            if changed:
+                observed_starts.clear()
         replay.attach_evidence(check, ids, times)
     replay.end(end_s)
     for record in seed.moves:
@@ -171,7 +257,7 @@ def comparison(task, left, right, records):
             for original, candidate in zip(old[a:b], records[c:d]):
                 different = (original.position_after is None or candidate.position_after is None
                     or board_signature(original.position_after) != board_signature(candidate.position_after))
-                timing = original.manual_override and (original.action_start_s, original.action_end_s) != (candidate.action_start_s, candidate.action_end_s)
+                timing = (original.action_start_s, original.action_end_s) != (candidate.action_start_s, candidate.action_end_s)
                 if different or timing:
                     changed += 1
                     if original.manual_override:
@@ -223,8 +309,18 @@ def integrate_recheck(task):
                     if r.move is not None or r.manual_override or r.position_edits is not None]
         added = changed = 0
         matched = set()
+        candidate_keys = {move_key(r) for r in confirmed}
         for candidate in confirmed:
-            event = next((i for i, (r, _, _, _) in enumerate(retained) if i not in matched and r.move is not None
+            exact = [i for i, (r, old_index, _, _) in enumerate(retained) if old_index is not None and i not in matched and r.move is not None
+                     and move_key(r) == move_key(candidate)]
+            landings = [i for i, (r, old_index, _, _) in enumerate(retained) if old_index is not None and i not in matched and r.move is not None
+                        and r.move.piece_id == candidate.move.piece_id and r.move.target == candidate.move.target
+                        and move_key(r) not in candidate_keys]
+            matches = exact or landings
+            event = min(matches, key=lambda i: (
+                retained[i][0].position_after is None or candidate.position_after is None
+                or board_signature(retained[i][0].position_after) != board_signature(candidate.position_after),
+                abs(retained[i][0].video_end_s - candidate.video_end_s))) if matches else next((i for i, (r, old_index, _, _) in enumerate(retained) if old_index is not None and i not in matched and r.move is not None
                 and r.move.piece_id == candidate.move.piece_id
                 and (abs((r.action_start_s if r.action_start_s is not None else r.video_end_s) - candidate.action_start_s) <= .25
                      or abs((r.action_end_s if r.action_end_s is not None else r.video_end_s) - candidate.action_end_s) <= .25)), None)
@@ -232,7 +328,12 @@ def integrate_recheck(task):
                 matched.add(event)
                 old, old_index, _, _ = retained[event]
                 if move_key(old) == move_key(candidate) and old.position_after is not None and candidate.position_after is not None and board_signature(old.position_after) == board_signature(candidate.position_after):
-                    retained[event] = (old, old_index, candidate.index, True)
+                    replacement = candidate.model_copy(deep=True)
+                    if old.manual_override:
+                        replacement.manual_override, replacement.status, replacement.reason = True, 'corrected', old.reason
+                        replacement.position_edits, replacement.position_side_to_move = old.position_edits, old.position_side_to_move
+                    retained[event] = (replacement, old_index, candidate.index, False)
+                    changed += int((old.action_start_s, old.action_end_s) != (candidate.action_start_s, candidate.action_end_s))
                 else:
                     if old.manual_override:
                         if old_index not in job.manual_conflicts:
@@ -248,8 +349,32 @@ def integrate_recheck(task):
             if review.status in ('auto_verified', 'corrected'):
                 continue
             retained.append((unconfirmed_record(review), None, review.index, False))
-        retained.sort(key=lambda entry: entry[0].action_start_s if entry[0].move is not None and entry[0].action_start_s is not None
+        retained.sort(key=lambda entry: entry[0].tracking_anchor_s if entry[0].tracking_anchor_s is not None
+                      else entry[0].action_start_s if entry[0].move is not None and entry[0].action_start_s is not None
                       else entry[0].video_end_s if entry[0].move is not None else entry[0].video_start_s)
+        current, previous_review, previous_end = task.moves[left - 1].position_after, None, job.start_s
+        reconciled = []
+        for entry in retained:
+            record, _, local_index, from_old = entry
+            if (not from_old and record.move is not None and record.position_before is not None
+                    and board_signature(current) != board_signature(record.position_before)):
+                if previous_review is None:
+                    previous_review = MoveRecord(index=left + len(reconciled) + 1, status='needs_review', change_type='review',
+                        video_start_s=min(previous_end, record.action_start_s), video_end_s=record.action_start_s,
+                        reason='前后局面尚未完整衔接，已从原视频确认的走棋前局面同步，中间操作保留待核对',
+                        evidence_ids=list(record.evidence_ids), evidence_times_s=list(record.evidence_times_s))
+                    reconciled.append((previous_review, None, None, False))
+                    job.unresolved += 1
+                previous_review.tracking_anchor = record.position_before.model_copy(deep=True)
+                previous_review.tracking_anchor_s = record.action_start_s
+                current = record.position_before
+            reconciled.append(entry)
+            if record.tracking_anchor is not None:
+                current = record.tracking_anchor
+            elif record.move is not None and record.position_after is not None:
+                current, previous_end = record.position_after, record.action_end_s or record.video_end_s
+            previous_review = record if record.status in ('needs_review', 'tentative') else None
+        retained = reconciled
         delta = len(retained) - (right - left - 1)
         old_mapping = {r.index: r.index if r.index <= left else r.index + delta
                        for r in task.moves if r.index <= left or r.index >= right}
@@ -291,10 +416,11 @@ def run_recheck(task_id, data_root, job_id):
     job = task.recheck
     if job is None or job.id != job_id or job.status != 'running':
         return
-    last_saved = 0
+    last_saved = last_scanned = 0
 
     def persist(t, count, records, final=False):
-        nonlocal last_saved
+        nonlocal last_saved, last_scanned
+        last_scanned = count
         if not final and monotonic() - last_saved < .5:
             return
         def update(latest):
@@ -304,6 +430,7 @@ def run_recheck(task_id, data_root, job_id):
         store.update_recheck(task_id, job_id, update)
         last_saved = monotonic()
 
+    cache_token = _tracking_cache.set(OrderedDict())
     try:
         records, matches = trace_range(store.task_dir(task.id) / 'source.mp4', task.calibration,
             task.moves[job.left_index - 1].position_after, job.start_s, job.end_s,
@@ -312,6 +439,7 @@ def run_recheck(task_id, data_root, job_id):
             state = latest.recheck
             state.records, state.endpoint_matches = records, matches
             state.processed_s = job.end_s
+            state.scanned_frames = last_scanned
             state.unresolved = sum(r.status not in ('auto_verified', 'corrected') for r in records)
             state.added, state.changed, state.removed, state.manual_conflicts = comparison(task, job.left_index, job.right_index, records)
             state.status = 'ready' if matches and not state.unresolved else 'needs_review'
@@ -329,3 +457,5 @@ def run_recheck(task_id, data_root, job_id):
             store.update_recheck(task_id, job_id, fail)
         except RevisionConflict:
             pass
+    finally:
+        _tracking_cache.reset(cache_token)

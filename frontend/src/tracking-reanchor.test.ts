@@ -15,6 +15,20 @@ const move = { index: 2, status: 'auto_verified', change_type: 'move', candidate
   evidence_ids: [], reason: '' } as MoveRecord;
 const task = { initial_position: before, moves: [gap, move], replay_mode: 'actual', rules_enabled: true, confirmed_prefix_length: 0 } as Task;
 
+it('末尾追加优先使用最近一条可用观察局面，与后端基准保持一致', () => {
+  const observed = { ...gap, index: 2, tracking_anchor: null, observed_positions: [anchor] } as MoveRecord;
+  const unknown = { ...gap, index: 3, tracking_anchor: null, observed_positions: [] } as MoveRecord;
+  const trailing = { ...task, moves: [{ ...move, index: 1 }, observed, unknown] } as Task;
+  expect(positionBefore(trailing, 4)).toEqual(anchor);
+  expect(positionBefore({ ...trailing, rules_enabled: false }, 4)).toEqual(anchor);
+});
+
+it('末尾未确认记录之前有同步锚点时，追加使用该锚点', () => {
+  const unknown = { ...gap, index: 3, tracking_anchor: null, observed_positions: [] } as MoveRecord;
+  const trailing = { ...task, moves: [{ ...move, index: 1 }, { ...gap, index: 2, tracking_anchor: after }, unknown] } as Task;
+  expect(positionBefore(trailing, 4)).toEqual(after);
+});
+
 it('重新同步保留审核区间，锚点不算一次走棋', () => {
   expect(visibleRecords(task)).toEqual([move]);
   expect(reviewIntervals(task)).toHaveLength(1);

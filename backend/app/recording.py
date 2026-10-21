@@ -32,9 +32,12 @@ def build_recording_playlist(task: Task, interval_s: int) -> dict:
     records = []
     current = task.initial_position
     for record in task.moves:
-        if record not in movements and not (record.change_type == 'setup' and record.manual_override):
+        inferred_snapshot = record.status == 'tentative' and record.move is None and record.predicted_position is not None
+        if record not in movements and not (record.change_type == 'setup' and record.manual_override) and not inferred_snapshot:
             continue
         saved = record.model_copy(deep=True)
+        if inferred_snapshot:
+            saved.position_before, saved.position_after = current.model_copy(deep=True), saved.predicted_position
         if saved.move is None and len(saved.candidates) == 1 and saved.board_check is not None and saved.board_check.status in ('verified', 'partial'):
             saved.move = saved.candidates[0].model_copy(deep=True)
         if saved.position_after is None and saved.move is not None:

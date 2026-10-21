@@ -26,8 +26,8 @@ export function planBoardTransition(before: Position | null, after: Position | n
   return { type, moved, removed, added };
 }
 
-interface Props { position: Position | null; step?: number; replace?: boolean; lastMove?: Move | null; onSquare?: (square: Square) => void; selected?: Square | null; reviews?: InitialPieceReview[] }
-export function Board({ position, step = 0, replace = false, lastMove, onSquare, selected, reviews = [] }: Props) {
+interface Props { position: Position | null; step?: number; replace?: boolean; lastMove?: Move | null; inferredMove?: Move | null; onSquare?: (square: Square) => void; selected?: Square | null; reviews?: InitialPieceReview[] }
+export function Board({ position, step = 0, replace = false, lastMove, inferredMove, onSquare, selected, reviews = [] }: Props) {
   const previous = useRef<{ position: Position | null; step: number }>({ position: null, step });
   const nodes = useRef(new Map<string, SVGGElement>());
   const piecesLayer = useRef<SVGGElement>(null);
@@ -125,6 +125,10 @@ export function Board({ position, step = 0, replace = false, lastMove, onSquare,
         <text y="7.8" textAnchor="middle" fill={p.color === 'red' ? '#a94734' : '#29312d'} className="piece-text">{pieceText[p.color][p.kind]}</text>
       </g>
     </g>)}</g>
+    {inferredMove && <g className="inferred-move-marker" role="img" aria-label="推断落点，待核对">
+      <circle cx={x(inferredMove.to.file)} cy={y(inferredMove.to.rank)} r="25" fill="none" stroke="#a86e1d" strokeWidth="3" strokeDasharray="5 3" />
+      <title>推断落点，待核对</title>
+    </g>}
     {reviews.map(r => <g key={`review-${r.square.file}-${r.square.rank}`} className="piece-review-marker" aria-label={`待核对：第${r.square.file + 1}列第${r.square.rank + 1}行`}>
       {r.state === 'occupancy' ? <rect x={x(r.square.file) - 22} y={y(r.square.rank) - 22} width="44" height="44" fill="#c077161a" stroke="#c07716" strokeWidth="2" strokeDasharray="5 3" /> : <circle cx={x(r.square.file)} cy={y(r.square.rank)} r="24" fill="none" stroke="#c07716" strokeWidth="3" strokeDasharray="5 3" />}
       {r.prediction === null && <text x={x(r.square.file)} y={y(r.square.rank) + 8} textAnchor="middle" fill="#9b5b0b" fontSize="26">{r.state === 'occupancy' ? '·' : '?'}</text>}

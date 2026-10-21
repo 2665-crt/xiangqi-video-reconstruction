@@ -1,4 +1,5 @@
 import { useId, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
+import { ChevronRight } from 'lucide-react';
 
 export function MotionRegion({ show, children, className = '', inline = false, id, keepMounted = false }: {
   show: boolean; children: ReactNode; className?: string; inline?: boolean; id?: string; keepMounted?: boolean;
@@ -60,14 +61,15 @@ export function MotionRegion({ show, children, className = '', inline = false, i
   </div>;
 }
 
-export function AnimatedDisclosure({ title, children, className = '' }: {
-  title: ReactNode; children: ReactNode; className?: string;
+export function AnimatedDisclosure({ title, children, className = '', open: controlledOpen, onToggle }: {
+  title: ReactNode; children: ReactNode; className?: string; open?: boolean; onToggle?: (open: boolean) => void;
 }) {
-  const [open, setOpen] = useState(false);
+  const [localOpen, setLocalOpen] = useState(false);
+  const open = controlledOpen ?? localOpen;
   const id = useId();
   return <div className={`animated-disclosure ${className}`}>
-    <button type="button" className="disclosure-trigger" aria-expanded={open} aria-controls={id} onClick={() => setOpen(!open)}>
-      <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true"><path d="m6 3 5 5-5 5" /></svg>
+    <button type="button" className="disclosure-trigger" aria-expanded={open} aria-controls={id} onClick={() => { setLocalOpen(!open); onToggle?.(!open); }}>
+      <ChevronRight size={14} aria-hidden="true" />
       <span>{title}</span>
     </button>
     <MotionRegion id={id} show={open} keepMounted>{children}</MotionRegion>

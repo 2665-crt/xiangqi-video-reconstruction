@@ -18,6 +18,9 @@ export interface MoveRecord {
   status: 'auto_verified' | 'needs_review' | 'corrected' | 'tentative';
   position_after: Position | null; evidence_ids: string[]; candidates: Move[]; reason: string;
   position_before?: Position | null;
+  predicted_position?: Position | null;
+  inference_score?: number | null;
+  depends_on_steps?: number[];
   tracking_anchor?: Position | null;
   tracking_anchor_s?: number | null;
   change_type?: 'move' | 'setup' | 'review'; observed_positions?: Position[];
@@ -35,6 +38,7 @@ export interface RecheckState {
   integrated?: boolean; integrated_count?: number;
 }
 export interface Task {
+  tracking_state?: 'tracking' | 'recovering'; tracking_since_s?: number | null; tracking_message?: string | null;
   id: string; filename: string; status: 'uploaded' | 'analyzing' | 'needs_review' | 'ready' | 'failed' | 'interrupted' | 'waiting_service' | 'action_required';
   stage: string; processed_video_s: number; start_s: number; end_s: number;
   evidence_end_s?: number | null;

@@ -146,3 +146,20 @@ def test_colour_conflict_keeps_the_real_detector_distribution(classifier,monkeyp
     position=fusion.recognize_position([board_image(original)],actual=True)[0]
     assert (position.pieces[0].color,position.pieces[0].kind)==('black','elephant')
     assert fusion.last_response['readings'][0]['class_probabilities']['black_elephant']>.79
+
+def test_deep_readings_recovers_weak_detection_and_keeps_scale_disagreement_unknown():
+    from app.deep_detector import DeepPieceDetector
+    detector = object.__new__(DeepPieceDetector)
+    def reading(label, confidence):
+        return {'class_probabilities': {label: .99}, 'confidence': confidence, 'bbox': [0, 0, 30, 30]}
+    ordinary = {(0, 0): reading('black_pawn', .69), (1, 0): reading('red_rook', .9)}
+    second = {(0, 0): reading('black_pawn', .9), (1, 0): reading('red_cannon', .9)}
+    calls = []
+    def readings(image, *, image_size=None):
+        calls.append(image_size)
+        return ordinary if image_size is None else second
+    detector.readings = readings
+    result = detector.deep_readings(None)
+    assert calls == [None, 640]
+    assert result[(0, 0)]['confidence'] == .9
+    assert (1, 0) not in result

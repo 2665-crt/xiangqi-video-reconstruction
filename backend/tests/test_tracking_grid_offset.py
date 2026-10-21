@@ -150,6 +150,29 @@ def test_checkpoint_saves_tracking_coordinates_without_replacing_manual_calibrat
     assert seed.calibration == saved.calibration == task.calibration
 
 
+def test_checkpoint_retains_recent_reference_mapping_for_unapplied_motion(tmp_path):
+    from app.checkpoint import CheckpointStore
+    from app.recovery import prepare_recovery, save_boundary_checkpoint
+    from app.schemas import opening_position
+    from test_board_motion import scene
+    _, original = scene()
+    reference = original.model_copy(deep=True)
+    for corner in reference.corners:
+        corner.x += 4
+    store = TaskStore(tmp_path)
+    task = store.create('slow-camera.mp4', VideoMetadata(width=640, height=480, duration_s=30, codec='h264'))
+    task.calibration, task.initial_position = original, opening_position()
+    task = store.save(task, task.revision)
+    task = prepare_recovery(task, store)
+    save_boundary_checkpoint(store, task, 12, task.initial_position, original, False, 10, reference)
+    saved = store.get(task.id)
+    state = CheckpointStore(store.root).load(task.id, saved.recovery.generation, saved.recovery.checkpoint)
+    seed = type(task).model_validate(state['seed'])
+    assert seed.resume_calibration == original
+    assert seed.resume_motion_reference_calibration == reference
+    assert seed.calibration == original
+
+
 def test_checkpoint_uses_event_time_coordinates_when_later_frames_have_been_prefetched(tmp_path, monkeypatch):
     from app.analysis import VideoEvent
     from app.schemas import opening_position
@@ -171,7 +194,7 @@ def test_checkpoint_uses_event_time_coordinates_when_later_frames_have_been_pref
     monkeypatch.setattr(actual, 'actual_events', events)
     checkpoints = []
     monkeypatch.setattr('app.recovery.save_boundary_checkpoint',
-                        lambda store, task, time_s, context, tracked, active, reference_s: checkpoints.append((time_s, tracked, active)))
+                        lambda store, task, time_s, context, tracked, active, reference_s, reference_calibration: checkpoints.append((time_s, tracked, active)))
     store = TaskStore(tmp_path)
     task = store.create('prefetch.mp4', VideoMetadata(width=640, height=480, duration_s=4, codec='h264'))
     task.initial_position, task.calibration = before, calibration

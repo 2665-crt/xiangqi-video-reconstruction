@@ -93,6 +93,9 @@ class MoveRecord(Model):
     evidence_times_s: list[float | None] = Field(default_factory=list)
     board_check: BoardCheck | None = None
     position_after: Position | None = None
+    predicted_position: Position | None = None
+    inference_score: float | None = None
+    depends_on_steps: list[int] = Field(default_factory=list)
     position_before: Position | None = None
     tracking_anchor: Position | None = None
     tracking_anchor_s: float | None = Field(default=None, ge=0)
@@ -227,6 +230,10 @@ class Task(Model):
     resume_calibration: Calibration | None = None
     resume_motion_active: bool = False
     resume_motion_reference_s: float | None = None
+    resume_motion_reference_calibration: Calibration | None = None
+    tracking_state: Literal['tracking', 'recovering'] = 'tracking'
+    tracking_since_s: float | None = None
+    tracking_message: str | None = None
     rebuild_video_s: float | None = None
     rebuild_target_s: float | None = None
     recheck: RecheckState | None = None
