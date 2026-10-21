@@ -15,4 +15,7 @@ playwright-report/
 /录屏存放/
 /直播录屏/
 /Ultralytics/
+/t/
+/u/
+/review-tmp/
 *.tsbuildinfo

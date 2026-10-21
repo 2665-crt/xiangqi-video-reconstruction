@@ -1,3 +1,5 @@
+import os
+
 import cv2
 import numpy as np
 
@@ -13,6 +15,14 @@ class BoardMotion:
         self.last_check_s = float('-inf')
         self.active = active
         self.last_feature_check_s = float('-inf')
+        self.cache_enabled = os.getenv('VIDEO_REFERENCE_CACHE', '1') != '0'
+        self._feature_gray = None
+        self._feature_key = None
+        self._feature_mask = None
+        self._points_ready = False
+        self._sift_ready = False
+        self._reference_points = None
+        self._reference_sift = None
 
     def update(self, time_s, frame):
         if time_s - self.last_check_s < .24:
@@ -25,11 +35,20 @@ class BoardMotion:
             return self.calibration
         corners = np.float32([[p.x, p.y] for p in self.reference_calibration.corners])
         applied = np.float32([[p.x, p.y] for p in self.calibration.corners])
-        mask = np.zeros_like(gray)
-        cv2.fillConvexPoly(mask, corners.astype(np.int32), 255)
+        feature_key = tuple(corners.ravel()), gray.shape, gray.dtype.str
+        if not self.cache_enabled or self._feature_gray is not self.gray or self._feature_key != feature_key:
+            self._feature_gray, self._feature_key = self.gray, feature_key
+            self._feature_mask = np.zeros_like(gray)
+            cv2.fillConvexPoly(self._feature_mask, corners.astype(np.int32), 255)
+            self._points_ready = self._sift_ready = False
+            self._reference_points = self._reference_sift = None
+        mask = self._feature_mask
         for method in ('flow', 'features'):
             if method == 'flow':
-                points = cv2.goodFeaturesToTrack(self.gray, 240, .01, 8, mask=mask)
+                if not self._points_ready:
+                    self._reference_points = cv2.goodFeaturesToTrack(self.gray, 240, .01, 8, mask=mask)
+                    self._points_ready = True
+                points = self._reference_points.copy() if self._reference_points is not None else None
                 if points is None or len(points) < 30:
                     continue
                 following, status, _ = cv2.calcOpticalFlowPyrLK(self.gray, gray, points, None)
@@ -42,7 +61,10 @@ class BoardMotion:
                     break
                 self.last_feature_check_s = time_s
                 detector = cv2.SIFT_create(nfeatures=1600)
-                old_keys, old_features = detector.detectAndCompute(self.gray, mask)
+                if not self._sift_ready:
+                    self._reference_sift = detector.detectAndCompute(self.gray, mask)
+                    self._sift_ready = True
+                old_keys, old_features = self._reference_sift
                 new_keys, new_features = detector.detectAndCompute(gray, None)
                 if old_features is None or new_features is None or len(new_features) < 2:
                     continue

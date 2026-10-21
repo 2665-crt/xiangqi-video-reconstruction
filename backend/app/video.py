@@ -1,4 +1,5 @@
 from pathlib import Path
+import os
 
 import av
 import cv2
@@ -29,8 +30,17 @@ def probe_video(path: Path) -> VideoMetadata:
 
 
 def iter_frames(path: Path, start_s: float, end_s: float):
+    try:
+        threads = int(os.getenv('VIDEO_DECODE_THREADS', '4'))
+        if threads < 0:
+            raise ValueError
+    except ValueError as exc:
+        raise ValueError('VIDEO_DECODE_THREADS 必须为非负整数，0 保留原解码模式') from exc
     with av.open(str(path)) as container:
         stream = container.streams.video[0]
+        if threads:
+            stream.codec_context.thread_count = threads
+            stream.thread_type = 'AUTO'
         offset = float((stream.start_time or 0) * stream.time_base)
         if start_s > 0:
             container.seek(int((start_s + offset) * av.time_base), backward=True)
