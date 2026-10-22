@@ -281,7 +281,7 @@ export default function App() {
       <MotionRegion show={!!(error || task?.error)}><div className="alert error" role="alert">{error || task?.error}</div></MotionRegion>
       {task && <RecoveryPanel task={task} busy={busy || !connected} stopping={stopping} onResume={resumeAnalysis} onStop={() => void stopAnalysis()} />}
       <MotionRegion show={!!notice}><div className="alert success" role="status">{notice}</div></MotionRegion>
-      {!configured && connected && <div className="config-notice"><Info size={17} aria-hidden="true" /><span>{configurationError || '自动识别需要先配置视觉模型。现在可以上传视频、校准棋盘和手动复盘。'}</span>{!configurationError && <details><summary>如何配置</summary><p>在项目目录的 .env 中填写模型接口地址、模型名称和密钥，再重新启动服务。配置名称与步骤见 README；密钥只在后端填写。</p></details>}</div>}
+      {!configured && connected && <div className="config-notice"><Info size={17} aria-hidden="true" /><span>{configurationError || '当前服务未启用自动识别。可先上传视频、校准棋盘和手动复盘。'}</span>{!configurationError && <details><summary>如何启用本地识别</summary><p>先停止服务，在项目目录运行 scripts/setup.ps1 -Fusion，再运行 scripts/start-fusion.ps1。训练好的模型已包含，无需 API Key 或重新训练。可选云端接口配置见 README。</p></details>}</div>}
       <div className={`workspace ${reviewIndex || draft ? 'has-editor' : ''}`}>
         <section className="panel source-panel"><div className="panel-heading"><div><Video size={19} /><h2>原始视频</h2></div><span className="panel-tag">视频对照</span></div>
           <VideoPanel task={task} videoRef={video} busy={!!locked} editing={editingCalibration} calibration={calibration} setCalibration={setCalibration} startTime={start}

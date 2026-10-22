@@ -70,14 +70,13 @@ def _stop_renderer(process):
 
 def encode_recording(manifest_path: Path, output_path: Path, progress, render_url: str, on_process=None):
     manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
-    node = shutil.which('node')
-    if node is None:
-        raise RuntimeError('未找到 Node.js，请检查本项目运行环境')
+    from .desktop import recording_command
+    command = recording_command(manifest_path, render_url)
     frame_count = 0
     error_log = manifest_path.parent / 'renderer-error.log'
     with error_log.open('wb') as errors:
-        process = subprocess.Popen([node, str(PROJECT_ROOT / 'scripts/render-recording.cjs'), str(manifest_path), render_url],
-                                   cwd=PROJECT_ROOT, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=errors)
+        process = subprocess.Popen(command, cwd=PROJECT_ROOT, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=errors,
+                                   creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
         packets = queue.Queue(maxsize=2)
         frames = queue.Queue(maxsize=2)
         stopping = threading.Event()
@@ -94,6 +93,8 @@ def encode_recording(manifest_path: Path, output_path: Path, progress, render_ur
         def read_packets():
             try:
                 while not stopping.is_set() and (line := process.stdout.readline()):
+                    if not line.strip():
+                        continue
                     packet = json.loads(line)
                     image = process.stdout.read(packet['bytes'])
                     if len(image) != packet['bytes']:
@@ -169,6 +170,8 @@ def encode_recording(manifest_path: Path, output_path: Path, progress, render_ur
                 if worker.ident is not None:
                     worker.join(timeout=5)
             process.stdout.close()
+            if os.getenv('XIANGQI_DESKTOP_EXE'):
+                shutil.rmtree(manifest_path.parent / 'renderer-profile', ignore_errors=True)
 
 
 class RecordingManager:

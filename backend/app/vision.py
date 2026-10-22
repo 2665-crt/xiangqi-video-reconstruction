@@ -190,7 +190,7 @@ class VisionClient:
             return result
         self.last_request_count = 1
         if not (self.base_url and self.key and self.model):
-            raise VisionRequestError('请先配置视觉模型', 'NotConfigured', 'configuration', retryable=False)
+            raise VisionRequestError('自动识别未就绪，请使用 scripts/start-fusion.ps1 启用本地模型；依赖安装和可选云端配置见 README', 'NotConfigured', 'configuration', retryable=False)
         prompt = ACTUAL_PROMPT if actual else PROMPT
         request_images = list(images[-3:])
         if actual and reference is not None:

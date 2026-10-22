@@ -27,7 +27,7 @@ class DeepPieceDetector:
     def __init__(self):
         import torch
         folder = Path(__file__).resolve().parents[1] / 'models/fusion'
-        cache = folder.parents[2] / 'data/ultralytics'
+        cache = Path(os.getenv('XIANGQI_DATA_ROOT', str(folder.parents[2] / 'data'))) / 'ultralytics'
         cache.mkdir(parents=True, exist_ok=True)
         os.environ['YOLO_CONFIG_DIR'] = str(cache)
         from ultralytics import YOLO

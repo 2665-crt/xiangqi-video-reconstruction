@@ -1,5 +1,7 @@
 .venv/
 .env
+.env.*
+!.env.example
 data/
 node_modules/
 dist/
@@ -9,16 +11,15 @@ __pycache__/
 test-results/
 playwright-report/
 *.log
+*.tsbuildinfo
+output/
+录屏存放/
+直播录屏/
+experiments/
 
-/experiments/
-/output/
-/录屏存放/
-/直播录屏/
 /Ultralytics/
+/归档/
+/releases/
 /t/
 /u/
 /review-tmp/
-*.tsbuildinfo
-
-/归档/
-/releases/
