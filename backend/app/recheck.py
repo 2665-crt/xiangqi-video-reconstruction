@@ -23,7 +23,8 @@ def range_bounds(task, first_index, second_index):
     if not 1 <= left < right <= len(task.moves):
         raise ValueError('请选择两个不同的走棋步骤')
     first, last = task.moves[left - 1], task.moves[right - 1]
-    if first.action_end_s is None or last.action_start_s is None or first.timing_status == 'uncertain' or last.timing_status == 'uncertain':
+    if (first.action_end_s is None or last.action_start_s is None
+            or first.timing_status in ('uncertain', 'estimated') or last.timing_status in ('uncertain', 'estimated')):
         raise ValueError('边界动作时间尚未确定，请先对照视频校正两个边界步骤的动作时间')
     if first.position_after is None or first.status not in ('auto_verified', 'corrected'):
         raise ValueError('请先确认前边界步骤完成后的局面')

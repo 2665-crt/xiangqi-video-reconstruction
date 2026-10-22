@@ -87,7 +87,7 @@ class MoveRecord(Model):
     video_end_s: float
     action_start_s: float | None = Field(default=None, ge=0)
     action_end_s: float | None = Field(default=None, ge=0)
-    timing_status: Literal['legacy', 'observed', 'uncertain'] = 'legacy'
+    timing_status: Literal['legacy', 'observed', 'uncertain', 'estimated'] = 'legacy'
     status: Literal["auto_verified", "needs_review", "corrected", "tentative"]
     evidence_ids: list[str] = Field(default_factory=list)
     evidence_times_s: list[float | None] = Field(default_factory=list)

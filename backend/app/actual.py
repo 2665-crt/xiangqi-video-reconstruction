@@ -30,7 +30,35 @@ def _tracking_image(image):
 _tracking_cache = ContextVar('tracking_cells_cache', default=None)
 
 
+def _trim_tracking_cache(cache):
+    for key in list(cache):
+        if cache[key][0]() is None:
+            del cache[key]
+    ordinary = [key for key in cache if key[1] != 'identity']
+    for key in ordinary[:-64]:
+        del cache[key]
+
+
+def _identity_evidence(image):
+    cache = _tracking_cache.get()
+    proof = cache.get((id(image), 'identity')) if cache is not None else None
+    return proof if proof is not None and proof[0]() is image else None
+
+
 def _tracking_cells(image, reference=None):
+    proof = _identity_evidence(image)
+    if proof is not None and len(proof) > 4:
+        cells = dict(proof[4])
+        cells.update({square: color for square, color in proof[1].items()
+                      if square not in cells or cells[square] is not None})
+        return cells
+    cells = _base_tracking_cells(image, reference)
+    if proof is not None:
+        cells.update({square: color for square, color in proof[1].items() if square not in cells})
+    return cells
+
+
+def _base_tracking_cells(image, reference=None):
     cache = _tracking_cache.get()
     if cache is None:
         return _read_tracking_cells(image, reference)
@@ -63,8 +91,7 @@ def _tracking_cells(image, reference=None):
     else:
         cells = _read_tracking_cells(image, reference)
     cache[key] = weakref.ref(image), dict(cells)
-    if len(cache) > 64:
-        cache.popitem(last=False)
+    _trim_tracking_cache(cache)
     return cells
 
 
@@ -403,7 +430,14 @@ def find_initial_frame(path, start_s, calibration, on_frame=None, allow_partial=
         searched_to, window = begin + .2, window * 2
 
 
-def _cells_position(current, cells, history):
+def _identity_matches(pieces, identities):
+    if not identities:
+        return True
+    occupied = {(p.square.file, p.square.rank): p.id for p in pieces}
+    return all(occupied.get(square) == identity for square, identity in identities.items())
+
+
+def _cells_position(current, cells, history, identities=None):
     occupied = {(p.square.file, p.square.rank): p for p in current.pieces}
     removed = [p for square, p in occupied.items() if square in cells and cells[square] != p.color]
     arrivals = [(square, color) for square, color in cells.items() if color is not None
@@ -413,17 +447,20 @@ def _cells_position(current, cells, history):
     pieces, used = [p.model_copy(deep=True) for p in current.pieces if p not in removed], set()
     for square, color in arrivals:
         candidates = [p for p in removed if p.color == color and p.id not in used]
+        if identities and square in identities:
+            candidates = [p for p in candidates if p.id == identities[square]]
         if len(candidates) != 1:
             if len(cells) == 90:
                 if isinstance(history, PositionHistory) and all(0 <= f < 9 and 0 <= r < 10 for f, r in cells):
                     occupied = tuple(sorted((f, r, c) for (f, r), c in cells.items() if c is not None))
                     previous = history.by_cells.get(occupied)
-                    if previous is not None:
+                    if previous is not None and _identity_matches(previous.pieces, identities):
                         return previous.model_copy(deep=True)
                 else:
                     for previous in reversed(history):
                         previous_cells = {(p.square.file, p.square.rank): p.color for p in previous.pieces}
-                        if all(previous_cells.get(s) == c for s, c in cells.items()):
+                        if (all(previous_cells.get(s) == c for s, c in cells.items())
+                                and _identity_matches(previous.pieces, identities)):
                             return previous.model_copy(deep=True)
             return None
         piece = candidates[0]
@@ -438,6 +475,8 @@ def _cells_position(current, cells, history):
     turn = ('black' if next(p for p in removed if p.id in used).color == 'red' else 'red') if len(used) == 1 else current.side_to_move
     order = {p.id: i for i, p in enumerate(current.pieces)}
     pieces.sort(key=lambda p: order.get(p.id, len(order)))
+    if not _identity_matches(pieces, identities):
+        return None
     return Position(pieces=pieces, side_to_move=turn)
 
 
@@ -501,6 +540,8 @@ def actual_events(frames, initial, confirmed_position=None, turn_boundaries=Fals
     pending, since, fallback, fallback_since, emitted = None, 0, None, 0, None
     last_time, last_image, dirty = first[0], first[1], not first_clear
     glyph_reference, glyph_since, glyph_pending = _glyphs(first[1], initial) if first_clear else None, None, None
+    proof = _identity_evidence(first[1])
+    glyph_tokens = proof[3] if proof is not None and len(proof) > 3 else {}
     glyph_checked = first[0]
     pending_after, pending_image = None, None
     pending_clear = False
@@ -625,7 +666,11 @@ def actual_events(frames, initial, confirmed_position=None, turn_boundaries=Fals
                     continue
                 glyph_checked = time_s
                 glyphs = _glyphs(image, current)
-                changed = glyph_reference is not None and len(glyphs) and bool(np.any(np.mean(np.abs(glyphs - glyph_reference), axis=(1, 2)) > .15))
+                proof = _identity_evidence(image)
+                tokens = proof[3] if proof is not None and len(proof) > 3 else {}
+                changed = (glyph_reference is not None and len(glyphs)
+                           and any(delta > .15 and (piece.id not in tokens or tokens[piece.id] != glyph_tokens.get(piece.id))
+                                   for piece, delta in zip(current.pieces, np.mean(np.abs(glyphs - glyph_reference), axis=(1, 2)))))
                 if changed:
                     stable = glyph_pending is not None and bool(np.max(np.mean(np.abs(glyphs - glyph_pending), axis=(1, 2))) < .035)
                     if not stable:
@@ -633,8 +678,10 @@ def actual_events(frames, initial, confirmed_position=None, turn_boundaries=Fals
                     elif time_s - glyph_since >= 1:
                         yield VideoEvent(glyph_since, [baseline, image])
                         glyph_reference, glyph_since, glyph_pending = glyphs, None, None
+                        glyph_tokens = tokens
                     continue
                 glyph_reference, glyph_since, glyph_pending = glyphs, None, None
+                glyph_tokens = tokens
                 baseline, peak, dirty = image, None, False
             elif any(s not in cells for s in occupied):
                 dirty, peak = True, image
@@ -646,10 +693,14 @@ def actual_events(frames, initial, confirmed_position=None, turn_boundaries=Fals
         dirty = True
         if peak is None:
             peak = image
-        after = _cells_position(current, cells, history)
+        proof = _identity_evidence(image)
+        identities = proof[2] if proof is not None and len(proof) > 2 else {}
+        after = _cells_position(current, cells, history, identities)
         suspended = set()
         if after is None and confirmed_position is not None:
             for previous_position in reversed(history):
+                if not _identity_matches(previous_position.pieces, identities):
+                    continue
                 action = snapshot_record(current, previous_position, 1, 0, time_s).move
                 if action is None:
                     continue
@@ -668,7 +719,7 @@ def actual_events(frames, initial, confirmed_position=None, turn_boundaries=Fals
                 after, suspended = previous_position.model_copy(deep=True), lifted
                 break
         if after is None and confirmed_position is not None:
-            after = _cells_position(current, {s: item[0] for s, item in witnesses.items()}, history)
+            after = _cells_position(current, {s: item[0] for s, item in witnesses.items()}, history, identities)
         if after is None and confirmed_position is not None and turn_boundaries:
             observed_cells = {s: item[0] for s, item in witnesses.items()}
             arrivals = {color for s, color in observed_cells.items() if color is not None and occupied.get(s) != color}
@@ -677,7 +728,7 @@ def actual_events(frames, initial, confirmed_position=None, turn_boundaries=Fals
                 lifted = {s for s, original in occupied.items() if original != color
                           and s in observed_cells and observed_cells[s] is None}
                 if lifted:
-                    candidate = _cells_position(current, {s: value for s, value in observed_cells.items() if s not in lifted}, history)
+                    candidate = _cells_position(current, {s: value for s, value in observed_cells.items() if s not in lifted}, history, identities)
                     if candidate is not None and snapshot_record(current, candidate, 1, 0, time_s).move is not None:
                         after, suspended = candidate, lifted
         moving = after is not None and not _landing_visible(image, current, after)
@@ -744,7 +795,7 @@ def actual_events(frames, initial, confirmed_position=None, turn_boundaries=Fals
                             history.append(current)
                             baseline = pending_image
                             glyph_reference, glyph_since, glyph_pending = None, None, None
-                            after = _cells_position(current, cells, history)
+                            after = _cells_position(current, cells, history, identities)
                             if after is None:
                                 pending, pending_after = None, None
                                 continue
@@ -1014,6 +1065,9 @@ def analyze_actual(task, store, vision):
                          for changed_s, calibration, active, reference_s, reference_calibration in reversed(calibration_changes)
                          if changed_s <= time_s + 1e-6), (tracking_calibration, False, None, None))
         frame_times = {}
+        tracking_samples = deque(maxlen=2048)
+        from .piece_tracking import PieceTracker
+        piece_tracker = PieceTracker()
         last_evidence_s = task.start_s
         def boards():
             nonlocal task, last_saved, tracking_calibration, frame_times
@@ -1037,8 +1091,7 @@ def analyze_actual(task, store, vision):
                         image.setflags(write=False)
                         cache = _tracking_cache.get()
                         cache[id(image), 'prepared'] = weakref.ref(image), variants
-                        if len(cache) > 64:
-                            cache.popitem(last=False)
+                        _trim_tracking_cache(cache)
                 except StopIteration:
                     scan.finish()
                     scan.update(task)
@@ -1103,6 +1156,13 @@ def analyze_actual(task, store, vision):
                 if image is None:
                     image = rectify_board(frame, tracking_calibration, margin=100)
                 image.setflags(write=False)
+                observations = _tracking_cells(image, current)
+                proof = piece_tracker.observe(time_s, image, current, observations,
+                                              allow_reseed=inference is None)
+                _tracking_cache.get()[id(image), 'identity'] = (weakref.ref(image), proof,
+                    piece_tracker.identities, piece_tracker.tokens, piece_tracker.observation.cells)
+                _trim_tracking_cache(_tracking_cache.get())
+                tracking_samples.append((time_s, _tracking_cells(image)))
                 frame_times[id(image)] = (weakref.ref(image), time_s)
                 if len(frame_times) > 256:
                     frame_times = {key: value for key, value in frame_times.items() if value[0]() is not None}
@@ -1160,10 +1220,13 @@ def analyze_actual(task, store, vision):
                 nonlocal inference_tail_signature, inference_tail_hits
                 nonlocal inference_tail_source, inference_empty_hits, inference_departed
                 if inference is not None:
-                    if time_s < inference_next_s:
+                    cells = _tracking_cells(image)
+                    previous_cells = inference.samples[-1][1] if inference.samples else None
+                    inference.sample(time_s, cells)
+                    if time_s < inference_next_s and not (len(cells) == 90 and cells == previous_cells
+                                                          and cells != inference.last_cells):
                         return None
                     inference_next_s = time_s + .4
-                    cells = _tracking_cells(image)
                     inference_departed.difference_update(square for square, color in cells.items() if color is not None)
                     # 同子可能属于下一回合；只延伸选区内已直接观察到离盘的动作。
                     if time_s > task.end_s and inference_tail_source not in inference_departed:
@@ -1183,13 +1246,15 @@ def analyze_actual(task, store, vision):
                             task.run_stats.reanchor_seconds += seconds
                             task.analysis_stats.reanchor_seconds += seconds
                         inference_fallback_s = visual_recovery.next_check_s if visual_recovery.requested else time_s + 10
-                        if candidate is not None and not inference.origin_uncertain:
+                        if candidate is not None:
                             from .analysis import VideoEvent
                             inference, inference_reanchored = None, True
                             return VideoEvent(time_s, [item[1] for item in visual_recovery.evidence], position=candidate,
                                 image_times_s=tuple(item[0] for item in visual_recovery.evidence), tracking_anchor=True,
                                 board_check=visual_recovery.board_check)
-                    records = inference.observe(time_s, cells, tail_only=time_s > task.end_s)
+                    proof = _identity_evidence(image)
+                    identities = proof[2] if proof is not None and len(proof) > 2 else {}
+                    records = inference.observe(time_s, cells, tail_only=time_s > task.end_s, identities=identities)
                     if time_s <= task.end_s:
                         inference_empty_hits = {square: inference_empty_hits.get(square, 0) + 1
                             for square, color in cells.items() if color is None}
@@ -1227,7 +1292,9 @@ def analyze_actual(task, store, vision):
                             from .analysis import VideoEvent
                             return VideoEvent(time_s, [], selection_complete=True)
                     signature = (tuple((r.move.piece_id, r.move.source.file, r.move.source.rank,
-                        r.move.target.file, r.move.target.rank, r.status) for r in records), inference.evidence_ready)
+                        r.move.target.file, r.move.target.rank, r.status, r.action_start_s, r.action_end_s,
+                        r.timing_status, r.board_check.model_dump_json() if r.board_check is not None else None)
+                        for r in records), inference.evidence_ready)
                     if signature == inference_signature:
                         return None
                     inference_signature = signature
@@ -1257,7 +1324,12 @@ def analyze_actual(task, store, vision):
                         from .move_inference import MoveInference
                         origin = rules.before if rules is not None else reference
                         start_s = (task.moves[-1].action_end_s or task.moves[-1].video_end_s) if task.moves else task.start_s
-                        inference = MoveInference(origin, start_s)
+                        reference_time_s = frame_times.get(id(reference_image), (None, None))[1]
+                        initial_samples = list(tracking_samples)
+                        if reference_time_s is not None:
+                            initial_samples.append((reference_time_s, _tracking_cells(reference_image)))
+                        inference = MoveInference(origin, start_s, samples=[(sample_s, sample_cells)
+                            for sample_s, sample_cells in initial_samples if start_s <= sample_s <= time_s])
                         inference_tail_source, inference_empty_hits, inference_departed = None, {}, set()
                         inference_prefix = len(task.moves)
                         inference_fallback_s = time_s + 1

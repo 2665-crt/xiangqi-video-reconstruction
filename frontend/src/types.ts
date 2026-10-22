@@ -13,7 +13,7 @@ export interface BoardCheck {
 export interface MoveRecord {
   index: number; move: Move | null; video_start_s: number; video_end_s: number;
   action_start_s?: number | null; action_end_s?: number | null;
-  timing_status?: 'legacy' | 'observed' | 'uncertain';
+  timing_status?: 'legacy' | 'observed' | 'uncertain' | 'estimated';
   board_check?: BoardCheck | null; evidence_times_s?: (number | null)[];
   status: 'auto_verified' | 'needs_review' | 'corrected' | 'tentative';
   position_after: Position | null; evidence_ids: string[]; candidates: Move[]; reason: string;
@@ -74,8 +74,27 @@ export const pieceText: Record<Color, Record<PieceKind, string>> = {
   black: { king: '将', advisor: '士', elephant: '象', horse: '马', rook: '车', cannon: '炮', pawn: '卒' },
 };
 export const timeText = (seconds: number) => `${Math.floor(seconds / 60).toString().padStart(2, '0')}:${Math.floor(seconds % 60).toString().padStart(2, '0')}`;
+export function moveSeekTime(record: MoveRecord): number {
+  const observed = record.action_start_s != null && !['uncertain', 'estimated'].includes(record.timing_status ?? 'legacy');
+  return Math.max(0, (observed ? record.action_start_s! : record.action_end_s ?? record.video_start_s) - 1);
+}
 export function moveTimeText(record: MoveRecord): string {
-  if (record.action_start_s == null || record.timing_status === 'uncertain') return '时间待核对';
-  const milliseconds = Math.round(Math.max(0, record.action_start_s - 1) * 1000);
-  return `${Math.floor(milliseconds / 60000).toString().padStart(2, '0')}:${Math.floor(milliseconds / 1000 % 60).toString().padStart(2, '0')}.${(milliseconds % 1000).toString().padStart(3, '0')}`;
+  const observed = record.action_start_s != null && !['uncertain', 'estimated'].includes(record.timing_status ?? 'legacy');
+  if (!observed && record.action_end_s == null) return '时间待核对';
+  const milliseconds = Math.round(moveSeekTime(record) * 1000);
+  return `${observed ? '' : '约 '}${Math.floor(milliseconds / 60000).toString().padStart(2, '0')}:${Math.floor(milliseconds / 1000 % 60).toString().padStart(2, '0')}.${(milliseconds % 1000).toString().padStart(3, '0')}`;
+}
+
+export function moveTimeTitle(record: MoveRecord): string {
+  return record.action_start_s != null && !['uncertain', 'estimated'].includes(record.timing_status ?? 'legacy')
+    ? `动作开始 ${record.action_start_s.toFixed(3)} 秒；点击提前 1 秒观看`
+    : `动作时间待核对，证据区间 ${record.video_start_s.toFixed(3)}—${record.video_end_s.toFixed(3)} 秒；点击定位 ${moveSeekTime(record).toFixed(3)} 秒`;
+}
+
+export function isAutomaticRecord(record: MoveRecord): boolean {
+  return record.status === 'auto_verified';
+}
+
+export function isPredictedRecord(record: MoveRecord | undefined): boolean {
+  return record?.status === 'tentative' && !!record.predicted_position;
 }

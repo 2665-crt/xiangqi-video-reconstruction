@@ -11,9 +11,9 @@ const saved = { ...initial, pieces: [{ ...initial.pieces[0], square: { file: 0, 
 const task = { id: 'fixture', replay_mode: 'actual', rules_enabled: true, initial_position: initial,
   metadata: { width: 901, height: 1001, duration_s: 5, codec: 'h264' },
   start_s: 0, end_s: 5, confirmed_prefix_length: 3, moves: [
-    { index: 1, move: null, status: 'corrected', change_type: 'setup', position_after: saved, video_end_s: 1, candidates: [], evidence_ids: [] },
-    { index: 2, move: null, status: 'corrected', change_type: 'review', position_after: saved, video_end_s: 2, candidates: [], evidence_ids: [] },
-    { index: 3, move: null, status: 'auto_verified', change_type: 'setup', position_before: initial, position_after: saved, video_end_s: 3, candidates: [], evidence_ids: [] },
+    { index: 1, move: null, status: 'corrected', change_type: 'setup', position_after: saved, video_start_s: 0, video_end_s: 1, candidates: [], evidence_ids: [] },
+    { index: 2, move: null, status: 'corrected', change_type: 'review', position_after: saved, video_start_s: 0, video_end_s: 2, candidates: [], evidence_ids: [] },
+    { index: 3, move: null, status: 'auto_verified', change_type: 'setup', position_before: initial, position_after: saved, video_start_s: 0, video_end_s: 3, candidates: [], evidence_ids: [] },
   ] } as unknown as Task;
 
 it('下一步跳过不计走棋的记录，编辑起点采用上一保存局面', () => {
