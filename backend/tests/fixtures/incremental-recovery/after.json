@@ -1,0 +1,293 @@
+{
+  "pieces": [
+    {
+      "id": "red_rook_0",
+      "color": "red",
+      "kind": "rook",
+      "square": {
+        "file": 0,
+        "rank": 9
+      }
+    },
+    {
+      "id": "red_horse_1",
+      "color": "red",
+      "kind": "horse",
+      "square": {
+        "file": 2,
+        "rank": 7
+      }
+    },
+    {
+      "id": "red_elephant_2",
+      "color": "red",
+      "kind": "elephant",
+      "square": {
+        "file": 2,
+        "rank": 9
+      }
+    },
+    {
+      "id": "red_advisor_3",
+      "color": "red",
+      "kind": "advisor",
+      "square": {
+        "file": 3,
+        "rank": 9
+      }
+    },
+    {
+      "id": "red_king_4",
+      "color": "red",
+      "kind": "king",
+      "square": {
+        "file": 4,
+        "rank": 9
+      }
+    },
+    {
+      "id": "red_advisor_5",
+      "color": "red",
+      "kind": "advisor",
+      "square": {
+        "file": 5,
+        "rank": 9
+      }
+    },
+    {
+      "id": "red_elephant_6",
+      "color": "red",
+      "kind": "elephant",
+      "square": {
+        "file": 6,
+        "rank": 9
+      }
+    },
+    {
+      "id": "red_horse_7",
+      "color": "red",
+      "kind": "horse",
+      "square": {
+        "file": 6,
+        "rank": 7
+      }
+    },
+    {
+      "id": "red_rook_8",
+      "color": "red",
+      "kind": "rook",
+      "square": {
+        "file": 5,
+        "rank": 8
+      }
+    },
+    {
+      "id": "red_cannon_1",
+      "color": "red",
+      "kind": "cannon",
+      "square": {
+        "file": 1,
+        "rank": 7
+      }
+    },
+    {
+      "id": "red_cannon_7",
+      "color": "red",
+      "kind": "cannon",
+      "square": {
+        "file": 4,
+        "rank": 7
+      }
+    },
+    {
+      "id": "red_pawn_0",
+      "color": "red",
+      "kind": "pawn",
+      "square": {
+        "file": 0,
+        "rank": 6
+      }
+    },
+    {
+      "id": "red_pawn_2",
+      "color": "red",
+      "kind": "pawn",
+      "square": {
+        "file": 2,
+        "rank": 5
+      }
+    },
+    {
+      "id": "red_pawn_4",
+      "color": "red",
+      "kind": "pawn",
+      "square": {
+        "file": 4,
+        "rank": 6
+      }
+    },
+    {
+      "id": "red_pawn_6",
+      "color": "red",
+      "kind": "pawn",
+      "square": {
+        "file": 6,
+        "rank": 6
+      }
+    },
+    {
+      "id": "red_pawn_8",
+      "color": "red",
+      "kind": "pawn",
+      "square": {
+        "file": 8,
+        "rank": 6
+      }
+    },
+    {
+      "id": "black_rook_0",
+      "color": "black",
+      "kind": "rook",
+      "square": {
+        "file": 0,
+        "rank": 0
+      }
+    },
+    {
+      "id": "black_horse_1",
+      "color": "black",
+      "kind": "horse",
+      "square": {
+        "file": 2,
+        "rank": 2
+      }
+    },
+    {
+      "id": "black_advisor_3",
+      "color": "black",
+      "kind": "advisor",
+      "square": {
+        "file": 3,
+        "rank": 0
+      }
+    },
+    {
+      "id": "black_king_4",
+      "color": "black",
+      "kind": "king",
+      "square": {
+        "file": 4,
+        "rank": 0
+      }
+    },
+    {
+      "id": "black_advisor_5",
+      "color": "black",
+      "kind": "advisor",
+      "square": {
+        "file": 5,
+        "rank": 0
+      }
+    },
+    {
+      "id": "black_elephant_6",
+      "color": "black",
+      "kind": "elephant",
+      "square": {
+        "file": 6,
+        "rank": 0
+      }
+    },
+    {
+      "id": "black_horse_7",
+      "color": "black",
+      "kind": "horse",
+      "square": {
+        "file": 6,
+        "rank": 2
+      }
+    },
+    {
+      "id": "black_rook_8",
+      "color": "black",
+      "kind": "rook",
+      "square": {
+        "file": 7,
+        "rank": 0
+      }
+    },
+    {
+      "id": "black_cannon_1",
+      "color": "black",
+      "kind": "cannon",
+      "square": {
+        "file": 1,
+        "rank": 2
+      }
+    },
+    {
+      "id": "black_cannon_7",
+      "color": "black",
+      "kind": "cannon",
+      "square": {
+        "file": 7,
+        "rank": 2
+      }
+    },
+    {
+      "id": "black_pawn_0",
+      "color": "black",
+      "kind": "pawn",
+      "square": {
+        "file": 0,
+        "rank": 3
+      }
+    },
+    {
+      "id": "black_pawn_2",
+      "color": "black",
+      "kind": "pawn",
+      "square": {
+        "file": 2,
+        "rank": 3
+      }
+    },
+    {
+      "id": "black_pawn_4",
+      "color": "black",
+      "kind": "pawn",
+      "square": {
+        "file": 4,
+        "rank": 3
+      }
+    },
+    {
+      "id": "black_pawn_6",
+      "color": "black",
+      "kind": "pawn",
+      "square": {
+        "file": 6,
+        "rank": 4
+      }
+    },
+    {
+      "id": "black_pawn_8",
+      "color": "black",
+      "kind": "pawn",
+      "square": {
+        "file": 8,
+        "rank": 3
+      }
+    },
+    {
+      "id": "black_elephant_2",
+      "color": "black",
+      "kind": "elephant",
+      "square": {
+        "file": 4,
+        "rank": 2
+      }
+    }
+  ],
+  "side_to_move": "black"
+}

@@ -33,7 +33,7 @@ it('审核显示整盘差异与原视频证据时间，并允许选区外真实�
   expect(html).toContain('操作后差异：9,1');
   expect(html).toContain('5.100 秒');
   expect(html).toContain('选区外 5.000 秒核对');
-  expect(html).toContain('max="6"');
+  expect(html).toContain('max="10"');
 });
 
 it('系统候选会预填棋子及目标位置，无需先手动修改才能确认', () => {

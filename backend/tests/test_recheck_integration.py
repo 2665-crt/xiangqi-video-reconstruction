@@ -149,3 +149,99 @@ def test_recovery_works_between_any_selected_boundaries(tmp_path):
     assert [r.move.piece_id for r in fixed.moves if r.move] == [
         'red_pawn_0', 'black_pawn_0', 'red_pawn_2', 'black_pawn_2']
     assert fixed.recheck.left_index == 3
+
+
+def test_partial_recheck_replaces_stale_times_and_order_without_duplicate_moves(tmp_path):
+    from app.recheck import integrate_recheck
+    task, positions, _ = fixture_task(TaskStore(tmp_path))
+    task = recovery(task, positions, partial=True)
+    black, red = [r.model_copy(deep=True) for r in task.recheck.records if r.move]
+    black.action_start_s, black.action_end_s = 5, 5.5
+    red.action_start_s, red.action_end_s = 1.5, 2
+    task.moves[1:1] = [red, black]
+    for i, record in enumerate(task.moves, 1):
+        record.index = record.move.index = i
+    task.recheck.right_index = 4
+    fixed = integrate_recheck(task)
+    moves = [r for r in fixed.moves if r.move]
+    assert [r.move.piece_id for r in moves] == ['red_pawn_0', 'black_pawn_0', 'red_pawn_2', 'black_pawn_2']
+    assert [r.action_end_s for r in moves] == [1, 3, 4, 6.5]
+    assert fixed.recheck.added == 0
+    assert fixed.recheck.changed == 2
+    assert fixed.moves[0] == task.moves[0]
+
+
+def test_comparison_counts_automatic_timing_corrections(tmp_path):
+    from app.recheck import comparison
+    task, positions, _ = fixture_task(TaskStore(tmp_path))
+    task = recovery(task, positions, partial=False)
+    old = task.recheck.records[0].model_copy(deep=True)
+    old.action_start_s, old.action_end_s = 4.5, 5
+    task.moves.insert(1, old)
+    assert comparison(task, 1, 3, [task.recheck.records[0]])[:3] == (0, 1, 0)
+
+
+def test_visual_anchor_is_applied_at_its_observed_time_after_earlier_moves(tmp_path):
+    from app.recheck import integrate_recheck
+    task, positions, _ = fixture_task(TaskStore(tmp_path))
+    task = recovery(task, positions, partial=True)
+    anchor = task.recheck.records[0]
+    anchor.video_end_s, anchor.tracking_anchor_s, anchor.tracking_anchor = 3.2, 3.2, positions[2]
+    fixed = integrate_recheck(task)
+    interior = fixed.moves[1:-1]
+    assert interior[0].move.piece_id == 'black_pawn_0'
+    assert interior[1].tracking_anchor_s == 3.2
+    assert interior[2].move.piece_id == 'red_pawn_2'
+
+
+def test_worker_saves_final_frame_count_even_when_progress_is_throttled(tmp_path, monkeypatch):
+    import app.recheck as recheck
+    store = TaskStore(tmp_path)
+    task, positions, _ = fixture_task(store)
+    task = recovery(task, positions, partial=False)
+    task.recheck.status = 'running'
+    store.save(task, 0)
+    def trace(*args):
+        args[-1](1, 1, [])
+        args[-1](5.9, 50, task.recheck.records)
+        return task.recheck.records, True
+    monkeypatch.setattr(recheck, 'trace_range', trace)
+    monkeypatch.setattr(recheck, 'monotonic', lambda: 0)
+    recheck.run_recheck(task.id, tmp_path, task.recheck.id)
+    assert store.get(task.id).recheck.scanned_frames == 50
+
+
+def test_partial_recheck_updates_wrong_origin_even_when_its_old_time_is_wrong(tmp_path):
+    from app.recheck import integrate_recheck
+    from app.schemas import Square
+    task, positions, _ = fixture_task(TaskStore(tmp_path))
+    task = recovery(task, positions, partial=True)
+    old = task.recheck.records[1].model_copy(deep=True)
+    old.move.source = Square(file=2, rank=3)
+    old.action_start_s, old.action_end_s = 5, 5.5
+    old.index = old.move.index = 2
+    task.moves.insert(1, old)
+    task.moves[-1].index = 3
+    task.recheck.right_index = 3
+    fixed = integrate_recheck(task)
+    moves = [r for r in fixed.moves if r.move and r.move.piece_id == 'black_pawn_0']
+    assert len(moves) == 1
+    assert moves[0].move.source == task.recheck.records[1].move.source
+    assert moves[0].action_end_s == 3
+
+
+def test_partial_recheck_keeps_identical_moves_observed_at_different_times(tmp_path):
+    from app.recheck import integrate_recheck
+    task, positions, _ = fixture_task(TaskStore(tmp_path))
+    task = recovery(task, positions, partial=True)
+    again = task.recheck.records[1].model_copy(deep=True)
+    again.index = again.move.index = 3
+    again.action_start_s, again.action_end_s = 4, 4.5
+    task.recheck.records[2] = again
+    fixed = integrate_recheck(task)
+    found = [r for r in fixed.moves if r.move and r.move.piece_id == 'black_pawn_0']
+    assert len(found) == 2
+    assert [r.action_end_s for r in found] == [3, 4.5]
+    assert fixed.recheck.added == 2
+    assert found[1].position_before == positions[1]
+    assert any(r.tracking_anchor is not None for r in fixed.moves)

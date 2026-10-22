@@ -1,6 +1,24 @@
 from .schemas import BoardCheck, Square
 
 
+def matching_piece_faces(before_image, after_image, before, after):
+    import cv2
+    import numpy as np
+    from .actual import _glyphs
+    from .schemas import Position
+    previous = {p.id: p for p in before.pieces}
+    following = [p for p in after.pieces if p.id in previous]
+    if not following:
+        return set()
+    old = Position(pieces=[previous[p.id] for p in following], side_to_move=before.side_to_move)
+    new = Position(pieces=following, side_to_move=after.side_to_move)
+    a, b = _glyphs(before_image, old), _glyphs(after_image, new)
+    return {p.id for p, first, last in zip(following, a, b)
+            if min(float(first[2:-2, 2:-2].std()), float(last[2:-2, 2:-2].std())) >= .04
+            and float(cv2.matchTemplate(last, first[2:-2, 2:-2].copy(), cv2.TM_CCOEFF_NORMED).max()) >= .9
+            and float(cv2.matchTemplate(first, last[2:-2, 2:-2].copy(), cv2.TM_CCOEFF_NORMED).max()) >= .9}
+
+
 def check_transition(before, after, before_cells, after_cells):
     old = {(p.square.file, p.square.rank): p for p in before.pieces}
     new = {(p.square.file, p.square.rank): p for p in after.pieces}

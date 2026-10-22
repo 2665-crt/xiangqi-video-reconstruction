@@ -113,6 +113,9 @@ class VideoEvent(NamedTuple):
     board_check: object | None = None
     moving_piece_ids: tuple[str, ...] = ()
     tracking_anchor: bool = False
+    inferred_records: object | None = None
+    selection_complete: bool = False
+    inferred_anchor: bool = False
 
 
 @lru_cache(maxsize=1)
@@ -454,11 +457,10 @@ def correct_interval(task: Task, index: int, actions: list[Move], video_time_s=N
                 record.inference_group = None
     time_s = video_time_s if video_time_s is not None else (original.video_end_s if original else task.processed_video_s)
     preceding_time = task.moves[index - 2].video_end_s if index > 1 else task.start_s
-    following_time = task.moves[index].video_end_s if index < len(task.moves) else task.end_s
-    if not preceding_time <= time_s <= following_time:
-        raise ValueError("落子时间必须位于前后步骤的时间范围内")
+    if not 0 <= time_s <= task.metadata.duration_s:
+        raise ValueError('时间必须位于原视频范围内')
     replacement = [MoveRecord(index=index + offset, move=action.model_copy(update={"index": index + offset}),
-                              video_start_s=original.video_start_s if original else preceding_time,
+                              video_start_s=min(original.video_start_s if original else preceding_time, time_s),
                               video_end_s=time_s, status="corrected",
                               evidence_ids=original.evidence_ids if original else [],
                               observed_positions=original.observed_positions if original and offset == len(actions) - 1 else [])

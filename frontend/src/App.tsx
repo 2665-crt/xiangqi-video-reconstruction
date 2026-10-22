@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { Check, CheckCircle2, ChevronLeft, ChevronRight, Clapperboard, FolderOpen, Grid2X2, Info, Pause, Play, Settings2, SkipBack, Video } from 'lucide-react';
 import { api } from './api';
 import { Board } from './components/Board';
 import { VideoPanel } from './components/VideoPanel';
@@ -24,22 +25,8 @@ function opening(): Position {
 }
 
 export default function App() {
-  const replayPanel = useRef<HTMLElement>(null);
-  const sourcePanel = useRef<HTMLElement>(null);
-  const recheckSlot = useRef<HTMLDivElement>(null);
-  const [analysisSpacing, setAnalysisSpacing] = useState(0);
-  const [replayHeight, setReplayHeight] = useState(0);
-  useEffect(() => {
-    const panel = replayPanel.current;
-    if (!panel) return;
-    const observer = new ResizeObserver(() => {
-      const bounds = panel.getBoundingClientRect();
-      const recording = panel.querySelector('.recording-panel')?.getBoundingClientRect();
-      setReplayHeight((recording?.bottom ?? bounds.bottom) - bounds.top);
-    });
-    observer.observe(panel);
-    return () => observer.disconnect();
-  }, []);
+  const [exportTarget, setExportTarget] = useState<HTMLDivElement | null>(null);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [task, setTask] = useState<Task | null>(null);
   const [tasks, setTasks] = useState<TaskSummary[]>([]);
   const [configured, setConfigured] = useState(false);
@@ -100,6 +87,7 @@ export default function App() {
 
   useEffect(() => {
     setPlaying(false); setStep(0); setDraft(null); setReviewIndex(null); setPicked(null); setEditingCalibration(false); setInserting(false); setSelectingRange(false); setRangeSteps([]);
+    setSettingsOpen(!!task && !task.initial_position);
     if (!task) return;
     localStorage.setItem('xiangqi-task-id', task.id);
     setStart(task.start_s); setEnd(task.end_s);
@@ -186,28 +174,6 @@ export default function App() {
     setInserting(false); setSelectingRange(true); setRangeSteps([]); setError(''); setNotice('');
   }
 
-  useEffect(() => {
-    if (!task) return;
-    const align = () => {
-      const status = sourcePanel.current?.querySelector<HTMLElement>('.analysis-status');
-      const slot = recheckSlot.current;
-      if (!status || !slot || window.innerWidth <= 740) return;
-      const left = status.getBoundingClientRect().top - parseFloat(getComputedStyle(status).marginTop || '0');
-      const right = slot.getBoundingClientRect().top;
-      const scanTitle = [...status.querySelectorAll('strong')].find(el => el.textContent === '视频扫描');
-      const recheckTitle = slot.querySelector('strong');
-      if (!scanTitle || !recheckTitle) return;
-      const leftOffset = scanTitle.getBoundingClientRect().top - status.getBoundingClientRect().top;
-      const rightOffset = recheckTitle.getBoundingClientRect().top - slot.getBoundingClientRect().top;
-      setAnalysisSpacing(Math.max(0, Math.round(right + rightOffset - left - leftOffset)));
-    };
-    const observer = new ResizeObserver(align);
-    if (sourcePanel.current) observer.observe(sourcePanel.current);
-    if (replayPanel.current) observer.observe(replayPanel.current);
-    window.addEventListener('resize', align); align();
-    return () => { observer.disconnect(); window.removeEventListener('resize', align); };
-  }, [task?.id, reviewIndex]);
-
   function editInitial() {
     if (!task) return;
     setPlaying(false); setStep(0); setReviewIndex(null);
@@ -292,23 +258,27 @@ export default function App() {
   const tokenEntries = task?.usage.filter(entry => typeof entry.total_tokens === 'number') ?? [];
   const recordedTokens = tokenEntries.reduce((sum, entry) => sum + Number(entry.total_tokens), 0);
 
-  return <div className="app-shell">
-    <header className="topbar"><div className="brand"><span className="brand-mark">棋</span><div><strong>棋局复刻</strong><small>XIANGQI REPLAY STUDIO</small></div><span className="version">第一版</span></div>
-      <div className="header-actions"><span className={`connection ${connected ? 'online' : ''}`}><i />{connected ? '本地工作台' : '服务未连接'}</span>
-        <select aria-label="打开已保存任务" value={task?.id ?? ''} onChange={e => { const id = e.target.value; if (id) void perform(async () => { setTask(await api.get(id)); }); }} disabled={locked}><option value="">打开已保存任务</option>{tasks.map(t => <option key={t.id} value={t.id}>{t.filename} · {t.steps} 手</option>)}</select></div>
+  return <div className="app-shell studio">
+    <header className="topbar">
+      <div className="brand"><span className="brand-mark">棋</span><div><strong>棋局复刻</strong><small>XIANGQI REPLAY STUDIO</small></div></div>
+      <div className="studio-project"><h1>象棋对局复盘</h1><span className={`save-state ${connected ? 'online' : ''}`} role="status"><CheckCircle2 size={15} />{busy ? '处理中' : settingsChanged || draft ? '未保存更改' : reviewIndex ? '校正待确认' : connected ? task ? '已保存' : '本地工作台' : '服务未连接'}</span></div>
+      <div className="header-actions"><label className="task-picker"><FolderOpen size={18} /><select aria-label="打开已保存任务" title={task?.filename ?? '打开已保存任务'} value={task?.id ?? ''} onChange={e => { const id = e.target.value; if (id) void perform(async () => { setTask(await api.get(id)); }); }} disabled={locked}><option value="">打开已保存任务</option>{tasks.map(t => <option key={t.id} value={t.id}>{t.filename} · {t.steps} 手</option>)}</select></label><div className="studio-export" ref={setExportTarget}>{!task && <button className="primary export-button" disabled><Clapperboard size={18} />导出对局录像</button>}</div></div>
     </header>
     <main>
-      <div className="page-heading"><div><p className="eyebrow">从真实对局，到每一步复现</p><h1>让每一手，都清晰可见。</h1><p className="intro">上传象棋直播录屏，对照原视频，逐步还原完整棋局。</p></div><div className="flow-label"><span>01 上传</span><i>→</i><span>02 识别</span><i>→</i><span>03 复盘</span></div></div>
+      <nav className="studio-workflow" aria-label="复盘流程">{['准备视频', '识别', '核对', '导出'].map((label, index) => {
+        const phase = task?.status === 'analyzing' ? 1 : task?.initial_position ? 2 : 0;
+        return <div key={label} className={`workflow-step ${index === phase ? 'current' : index < phase ? 'complete' : ''}`} aria-current={index === phase ? 'step' : undefined}><span className="workflow-number">{index < phase ? <Check size={15} /> : index + 1}</span><span>{label}</span></div>;
+      })}</nav>
       <MotionRegion show={!!(error || task?.error)}><div className="alert error" role="alert">{error || task?.error}</div></MotionRegion>
       {task && <RecoveryPanel task={task} busy={busy || !connected} stopping={stopping} onResume={resumeAnalysis} onStop={() => void stopAnalysis()} />}
       <MotionRegion show={!!notice}><div className="alert success" role="status">{notice}</div></MotionRegion>
-      {!configured && connected && <div className="config-notice"><span className="info-icon">i</span><span>{configurationError || '自动识别需要先配置视觉模型。现在可以上传视频、校准棋盘和手动复盘。'}</span>{!configurationError && <details><summary>如何配置</summary><p>在项目目录的 .env 中填写模型接口地址、模型名称和密钥，再重新启动服务。配置名称与步骤见 README；密钥只在后端填写。</p></details>}</div>}
-      <div className="workspace">
-        <section ref={sourcePanel} className="panel source-panel"><div className="panel-heading"><div><span className="panel-number">01</span><h2>原始录屏</h2></div><span className="panel-tag">视频输入</span></div>
+      {!configured && connected && <div className="config-notice"><Info size={17} aria-hidden="true" /><span>{configurationError || '自动识别需要先配置视觉模型。现在可以上传视频、校准棋盘和手动复盘。'}</span>{!configurationError && <details><summary>如何配置</summary><p>在项目目录的 .env 中填写模型接口地址、模型名称和密钥，再重新启动服务。配置名称与步骤见 README；密钥只在后端填写。</p></details>}</div>}
+      <div className={`workspace ${reviewIndex || draft ? 'has-editor' : ''}`}>
+        <section className="panel source-panel"><div className="panel-heading"><div><Video size={19} /><h2>原始视频</h2></div><span className="panel-tag">视频对照</span></div>
           <VideoPanel task={task} videoRef={video} busy={!!locked} editing={editingCalibration} calibration={calibration} setCalibration={setCalibration} startTime={start}
             onUpload={file => void perform(async () => { setTask(await api.upload(file)); setNotice('视频已上传。请检查棋盘范围，再开始识别。'); })}
             onTime={(time, seeking) => { if (mode === '对照' && task && !draft && !reviewIndex) { setPlaying(false); setBoardJump(seeking); setStep(stepAtVideoTime(task, time)); } }} />
-          {task ? <div className="setup-section"><div className="section-heading"><h3>识别设置</h3>{!editingCalibration && <button className="text-button" disabled={!!locked} onClick={() => { video.current?.pause(); calibrationBeforeEdit.current = calibration ? structuredClone(calibration) : null; setEditingCalibration(true); }}>调整棋盘范围</button>}</div>
+          {task ? <AnimatedDisclosure className="setup-disclosure" title={<><Settings2 size={17} /><span>识别设置</span><small>{task.status === 'analyzing' ? '正在分析' : settingsOpen || editingCalibration ? '已展开' : '已折叠'}</small></>} open={settingsOpen || editingCalibration || task.status === 'analyzing'} onToggle={setSettingsOpen}><div className="setup-section"><div className="section-heading"><h3>识别设置</h3>{!editingCalibration && <button className="text-button" disabled={!!locked} onClick={() => { video.current?.pause(); calibrationBeforeEdit.current = calibration ? structuredClone(calibration) : null; setEditingCalibration(true); }}>调整棋盘范围</button>}</div>
             {editingCalibration && <div className="action-pair"><button className="primary" disabled={!!locked} onClick={() => saveSettings()}>确认棋盘范围</button><button className="secondary" disabled={!!locked} onClick={() => { setCalibration(calibrationBeforeEdit.current); setEditingCalibration(false); }}>取消调整</button></div>}
             {!editingCalibration && task.calibration_confirmed && !settingsChanged && <p className="hint" role="status">棋盘范围已确认，识别和解析使用此范围。</p>}
             <div className="input-pair"><label>开始时间（秒）<input type="number" min="0" max={end} step="0.1" aria-label="开始时间" value={start} disabled={!!locked} onChange={e => setStart(Number(e.target.value))} /></label><label>结束时间（秒）<input type="number" min={start} max={task.metadata.duration_s} step="0.1" aria-label="结束时间" value={end} disabled={!!locked} onChange={e => setEnd(Number(e.target.value))} /></label></div>
@@ -318,38 +288,27 @@ export default function App() {
             <div className="action-pair"><button className="secondary" disabled={!!locked || !!draft} onClick={() => saveSettings()}>保存设置</button><button className="secondary" disabled={!!locked || !configured || !calibration || !!draft} onClick={() => saveSettings('initial')}>{busy ? '正在处理…' : '单独识别起始画面（可选）'}</button></div>
             <button className="primary full" aria-busy={task.status === 'analyzing' || busy} disabled={!!locked || !configured || !calibration} onClick={() => saveSettings('analyze')}>{task.status === 'analyzing' ? '正在分析…' : '自动解析并复刻所选区间'}</button>
             {task.status === 'analyzing' && <button className="stop-analysis full" disabled={stopping} onClick={() => void stopAnalysis()}>{stopping ? '正在停止…' : '停止分析并保留进度'}</button>}
-            <div className="analysis-status" style={analysisSpacing ? { marginTop: analysisSpacing } : undefined}><div role="status"><span className={task.status === 'analyzing' ? 'pulse-dot' : 'small-dot'} /><strong key={task.stage} className="stage-label">{task.stage}</strong></div>
-              <div><strong>视频扫描</strong><span>{Math.round(scanProgress)}%</span></div><div className="progress-track" role="progressbar" aria-label="视频扫描进度" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(scanProgress)}><i style={{ transform: `scaleX(${scanProgress / 100})` }} /></div><small>已扫描至 {timeText(scanTime)} / {timeText(task.end_s)} · 保存 {task.scan_events ?? 0} 个疑似变化事件</small>
-              <div><strong>局面处理</strong><span>{Math.round(progress)}%</span></div><div className="progress-track" role="progressbar" aria-label="局面处理进度" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(progress)}><i style={{ transform: `scaleX(${progress / 100})` }} /></div><small>已处理至 {timeText(task.recognition_video_s || task.processed_video_s)} · 最近确认落点 {timeText(confirmedTime)} · {intervals.length} 段待核对区间 · 待处理 {Math.max(task.pending_event_count ?? 0, task.recovery?.pending_request ? 1 : 0)} 个</small>
-              {task.rebuild_video_s != null && <p>正在重建至 {timeText(task.rebuild_video_s)}，目标 {timeText(task.rebuild_target_s ?? task.processed_video_s)}</p>}
-              {task.recovery?.request_started_at && <p>正在{task.recovery.phase === 'tls' ? '建立安全连接' : task.recovery.phase === 'upload' ? '发送截图' : task.recovery.phase === 'response' ? '等待模型响应' : '连接模型服务'}，已等待 {requestSeconds} 秒；已有扫描结果保留。</p>}
-              {task.status === 'analyzing' && task.recovery?.heartbeat_at && <small>后台最后活动：{Math.max(0, Math.floor(clock / 1000 - task.recovery.heartbeat_at))} 秒前</small>}
-            </div>
             <div className="cost-status" aria-label="识别用量"><strong>检测与识别记录</strong><div><span>本地检查 {task.analysis_stats?.scanned_frames ?? 0} 帧</span><span>模型请求 {task.analysis_stats?.model_requests ?? 0} 次</span><span>发送 {task.analysis_stats?.images_sent ?? 0} 张图</span><span>已记录 {tokenEntries.length ? recordedTokens.toLocaleString() : '—'} Token</span></div><small>请求与图片数从本次升级后累计；Token 保留历史记录。无变化时不重复请求，短暂疑点会补充图片。金额以供应方账单为准。</small></div>
             {task.run_stats && <div className="cost-status" aria-label="本次分析耗时"><strong>本次分析</strong><div><span>用时 {task.run_stats.elapsed_seconds.toFixed(1)} 秒</span><span>本次模型请求 {task.run_stats.model_requests} 次</span><span>本次发送 {task.run_stats.images_sent} 张图</span>{task.run_stats.backfill_intervals != null && <span>局部回查 {task.run_stats.backfill_intervals} 次 · {(task.run_stats.backfill_seconds ?? 0).toFixed(1)} 秒</span>}</div><small>准备与初始化 {(task.run_stats.initialization_seconds ?? 0).toFixed(1)} 秒 · 主扫描解码 {task.run_stats.decode_seconds.toFixed(1)} 秒 · 主扫描检测 {task.run_stats.opencv_seconds.toFixed(1)} 秒 · 模型等待 {task.run_stats.model_seconds.toFixed(1)} 秒</small></div>}
-          </div> : <div className="source-guide"><h3>准备一段完整的对局录屏</h3><p>棋盘完整、镜头固定，方便准确定位。轻度模糊或短时遮挡会结合前后画面分析。</p><div><span>固定视角</span><span>完整棋盘</span><span>连续对局</span></div></div>}
           {task && <AnimatedDisclosure className="sop" title="复盘操作说明"><p>先检查原视频与四角范围，再识别。点击棋谱可定位原视频；待确认步骤可查看截图并校正。结果自动保存在当前任务中。</p></AnimatedDisclosure>}
+          </div></AnimatedDisclosure> : <div className="source-guide"><h3>准备一段完整的对局录屏</h3><p>棋盘完整、镜头固定，方便准确定位。轻度模糊或短时遮挡会结合前后画面分析。</p><div><span>固定视角</span><span>完整棋盘</span><span>连续对局</span></div></div>}
         </section>
-        <section ref={replayPanel} className="panel replay-panel"><div className="panel-heading"><div><span className="panel-number">02</span><h2>虚拟棋盘</h2></div><span className="panel-tag jade">逐步复现</span></div>
-          <div className="board-toolbar"><span className="turn-indicator"><i className={`side-dot ${display?.side_to_move ?? ''}`} />{display ? task?.rules_enabled ? '规则问题仅提示 · 可手动校正' : task?.replay_mode === 'actual' ? '按实际画面还原局面' : `${display.side_to_move === 'red' ? '红方' : '黑方'}走棋` : '等待棋局'}</span><div className="segmented replay-mode" role="group" aria-label="回放模式" data-mode={mode}><span className="mode-indicator" aria-hidden="true" /><button aria-pressed={mode === '演绎'} className={mode === '演绎' ? 'active' : ''} onClick={() => { setMode('演绎'); video.current?.pause(); }}>演绎模式</button><button aria-pressed={mode === '对照'} className={mode === '对照' ? 'active' : ''} onClick={() => { setMode('对照'); setPlaying(false); if (task && video.current && !draft && !reviewIndex) { setBoardJump(true); setStep(stepAtVideoTime(task, video.current.currentTime)); } }}>视频对照</button></div></div>
-          {display && <div className="piece-counts" aria-label="棋子数量"><span>{draft ? '待核对局面' : `第${task ? displayStep(task, reviewIndex ?? step) : 0}${task?.rules_enabled ? '步' : '手'}局面`}</span><strong>共 {display.pieces.length} 枚</strong><span>红方 {display.pieces.filter(p => p.color === 'red').length} 枚</span><span>黑方 {display.pieces.filter(p => p.color === 'black').length} 枚</span></div>}
-          <div className={`board-container ${reviewIndex ? 'editing-board' : ''}`}><div className="board-editor"><Board key={task?.id ?? 'empty'} position={display} step={task ? displayStep(task, step) : step} replace={mode === '对照' && boardJump} lastMove={lastMove} selected={reviewIndex ? picked : null} onSquare={!locked && (draft || reviewIndex) ? paint : undefined} reviews={initialReviews} /><MotionRegion show={!!reviewIndex && !!task} inline className="board-review-presence">{reviewIndex && task && (reviewPosition ? <ReviewPanel key={`${task.id}:${reviewIndex}:${inserting}`} insert={inserting} task={task} index={reviewIndex} position={reviewPosition} picked={picked} busy={!!locked} videoTime={video.current?.currentTime ?? task.start_s} onPreview={setReviewDraft} onClose={() => { setReviewIndex(null); setPicked(null); }} onSavePosition={(position, time, startTime) => void perform(async () => { const saved = await api.correctPosition(task, reviewIndex, position, time, startTime); setTask(saved); setStep(reviewIndex); setReviewIndex(null); setPicked(null); setNotice('局面已保存，后续保留原走法并承接校正结果。'); })} onSave={(moves, time, startTime) => void perform(async () => { if (inserting && moves[0]) {
+        <section className="panel replay-panel"><div className="panel-heading"><div><Grid2X2 size={19} /><h2>棋盘复盘</h2></div><div className="segmented replay-mode" role="group" aria-label="回放模式" data-mode={mode}><span className="mode-indicator" aria-hidden="true" /><button aria-pressed={mode === '演绎'} className={mode === '演绎' ? 'active' : ''} onClick={() => { setMode('演绎'); video.current?.pause(); }}>演绎模式</button><button aria-pressed={mode === '对照'} className={mode === '对照' ? 'active' : ''} onClick={() => { setMode('对照'); setPlaying(false); if (task && video.current && !draft && !reviewIndex) { setBoardJump(true); setStep(stepAtVideoTime(task, video.current.currentTime)); } }}>视频对照</button></div></div>
+          <div className={`board-container ${reviewIndex ? 'editing-board' : ''}`}><div className="board-editor"><Board key={task?.id ?? 'empty'} position={display} step={task ? displayStep(task, step) : step} replace={mode === '对照' && boardJump} lastMove={lastMove} inferredMove={task?.moves[step - 1]?.status === 'tentative' && task.moves[step - 1].predicted_position ? lastMove : null} selected={reviewIndex ? picked : null} onSquare={!locked && (draft || reviewIndex) ? paint : undefined} reviews={initialReviews} /><MotionRegion show={!!reviewIndex && !!task} inline className="board-review-presence">{reviewIndex && task && (reviewPosition ? <ReviewPanel key={`${task.id}:${reviewIndex}:${inserting}`} insert={inserting} task={task} index={reviewIndex} position={reviewPosition} picked={picked} busy={!!locked} videoTime={video.current?.currentTime ?? task.start_s} onPreview={setReviewDraft} onClose={() => { setReviewIndex(null); setPicked(null); }} onSavePosition={(position, time, startTime) => void perform(async () => { const saved = await api.correctPosition(task, reviewIndex, position, time, startTime); setTask(saved); setStep(reviewIndex); setReviewIndex(null); setPicked(null); setNotice('局面已保存，后续保留原走法并承接校正结果。'); })} onSave={(moves, time, startTime) => void perform(async () => { if (inserting && moves[0]) {
                 const saved = await api.insert(task, reviewIndex, moves[0], time, startTime);
                 setTask(saved); setStep(reviewIndex); setReviewIndex(reviewIndex + 1); setPicked(null); setReviewDraft(null);
                 setRangeSteps([]); setNotice('遗漏走棋已插入，已有步骤顺延；可以继续补下一手。'); return;
               } const saved = await api.correct(task, reviewIndex, moves, time, startTime); setTask(saved); setStep(isIgnored(saved.moves[reviewIndex - 1]) ? previousStep(saved, reviewIndex) : reviewIndex); setReviewIndex(null); setPicked(null); setNotice(moves.length ? '当前走法已替换，后续承接校正结果；规则问题仅提示。' : '已确认不计入走棋，列表、计数、回放和导出均已跳过。'); })} /> : <div className="alert error">请先确认第 {task.confirmed_prefix_length + 1} 手，再处理后面的步骤。<button className="text-button" onClick={() => setReviewIndex(task.confirmed_prefix_length + 1)}>前往首个疑点</button></div>)}</MotionRegion></div></div>
+          <MotionRegion className="inference-notice" show={task?.moves[step - 1]?.status === 'tentative' && !!task.moves[step - 1].predicted_position}><p role="status" className="hint">{task?.moves[step - 1]?.move ? '当前显示推断局面，虚线标出推断落点；后续画面仍在核对，可手动校正。' : '当前显示推断恢复局面；前序差异与棋子身份仍需核对，可手动校正。'}</p></MotionRegion>
           {!reviewIndex && task?.moves[step - 1]?.violation_note && <p className="rule-warning replay-rule-warning" role="status">{task.moves[step - 1].violation_note}</p>}
-          <div className="replay-controls"><button aria-label="回到初始局面" title="回到初始局面" disabled={!display || !!draft} onClick={() => selectStep(0)}>↤</button><button aria-label="上一步" disabled={step === 0 || !!draft} onClick={() => task && selectStep(previousStep(task, step))}>‹</button>
-            <button className="play-button" aria-label={playing ? '暂停回放' : '自动播放'} disabled={!task || confirmed === 0 || !!draft || mode === '对照'} onClick={() => { setPlaying(!playing); setReviewIndex(null); if (!playing && step >= lastKnown) setStep(0); }}>{playing ? 'Ⅱ' : '▶'}</button>
-            <button aria-label="下一步" disabled={!task || step >= lastKnown || !!draft} onClick={() => { if (task) { const next = visibleRecords(task).find(r => r.index > step); if (next) selectStep(next.index); } }}>›</button><span className="step-count">第 <b>{task ? displayStep(task, step) : 0}</b> / {total} {task?.rules_enabled ? '步' : '手'}</span>
+          <div className="replay-controls"><button aria-label="回到初始局面" title="回到初始局面" disabled={!display || !!draft} onClick={() => selectStep(0)}><SkipBack size={17} /></button><button aria-label="上一步" disabled={step === 0 || !!draft} onClick={() => task && selectStep(previousStep(task, step))}><ChevronLeft size={17} /><span>上一步</span></button>
+            <button className="play-button" aria-label={playing ? '暂停回放' : '自动播放'} disabled={!task || confirmed === 0 || !!draft || mode === '对照'} onClick={() => { setPlaying(!playing); setReviewIndex(null); if (!playing && step >= lastKnown) setStep(0); }}>{playing ? <Pause size={21} fill="currentColor" /> : <Play size={21} fill="currentColor" />}</button>
+            <button aria-label="下一步" disabled={!task || step >= lastKnown || !!draft} onClick={() => { if (task) { const next = visibleRecords(task).find(r => r.index > step); if (next) selectStep(next.index); } }}><span>下一步</span><ChevronRight size={17} /></button><span className="step-count">第 <b>{task ? displayStep(task, step) : 0}</b> / {total} {task?.rules_enabled ? '步' : '手'}</span>
             <select aria-label="播放步间隔" value={interval} onChange={e => setIntervalSeconds(Number(e.target.value))}>{[1, 2, 3].map(n => <option key={n} value={n}>{n} 秒 / 手</option>)}</select>
           </div>
+          {display && <div className="piece-counts" aria-label="棋子数量"><span>{draft ? '待核对局面' : `第${task ? displayStep(task, reviewIndex ?? step) : 0}${task?.rules_enabled ? '步' : '手'}局面`}</span><strong>共 {display.pieces.length} 枚</strong><span>红方 {display.pieces.filter(p => p.color === 'red').length} 枚</span><span>黑方 {display.pieces.filter(p => p.color === 'black').length} 枚</span></div>}
+          <div className="board-context"><span className="turn-indicator"><i className={`side-dot ${display?.side_to_move ?? ''}`} />{display ? task?.rules_enabled ? '规则问题仅提示 · 可手动校正' : task?.replay_mode === 'actual' ? '按实际画面还原局面' : `${display.side_to_move === 'red' ? '红方' : '黑方'}走棋` : '等待棋局'}</span></div>
           <div className="board-actions"><span>{confirmedMoves} 手已确认{total > confirmedRecords && ` · ${total - confirmedRecords} 手待复核`}{!!intervals.length && ` · ${intervals.length} 段视频待核对`}</span><div>{task && <button className="text-button" disabled={!!locked} onClick={editInitial}>设置初始棋局</button>}{step > 0 && task && <button className="text-button" disabled={!!locked || !!draft} onClick={() => { setPlaying(false); setPicked(null); setInserting(false); setReviewIndex(step); }}>校正此步</button>}{step > 0 && task && <button className="text-button" disabled={!!locked || !!draft} onClick={() => { setPlaying(false); setPicked(null); setInserting(true); setReviewIndex(reviewIndex ?? step); }}>在此步前插入</button>}{task?.initial_position && <button className="text-button" disabled={!!locked || !!draft} onClick={() => { setPlaying(false); setStep(lastKnown); setPicked(null); setInserting(true); setReviewIndex(task.moves.length + 1); }}>末尾追加走棋</button>}</div></div>
-          {task && <RecordingPanel key={task.id} task={task} intervalS={interval} />}
-          {task && <div ref={recheckSlot} className="recheck-slot"><RecheckPanel task={task} busy={busy || !!reviewIndex || !!draft || settingsChanged} onSelect={selectStep}
-            onCancel={() => void perform(async () => { setTask(await api.cancelRecheck(task)); })}
-            onApply={() => {
-              void perform(async () => { const latest = await api.get(task.id); const saved = await api.applyRecheck(latest); setTask(saved); setStep(saved.recheck?.left_index ?? 0); setReviewIndex(null); setReviewDraft(null); setDraft(null); setPicked(null); setInserting(false); setRangeSteps([]); setNotice('区间棋谱已更新，后续回放与导出使用修复后的顺序。'); }); }} /></div>}
           <MotionRegion show={!!draft && !!task}>{draft && task && <section className="review-panel"><div className="section-heading"><h3>设置初始棋局</h3><button className="text-button" onClick={() => setDraft(null)}>取消</button></div><p className="hint">选择棋子后点击交叉点放置；选择“移除”删除该位置棋子。允许特殊摆局数量，保存时检查重复位置和将帅位置。</p>
             {initialReviews.length > 0 && <div className="initial-review-warning" role="status"><strong>已展示可识别部分，以下 {initialReviews.length} 处需要核对</strong><p>橙色虚线为待核对位置；问号表示棋种未知，方框表示有无棋子尚不确定。候选棋种和模型评分不代表已确认正确。</p><ul>{initialReviews.map(r => <li key={`${r.square.file}-${r.square.rank}`}>第{r.square.file + 1}列第{r.square.rank + 1}行 · {r.state === 'occupancy' ? '占位未知' : `${r.color === 'red' ? '红' : r.color === 'black' ? '黑' : ''}${r.prediction && r.color ? pieceText[r.color][r.prediction] : '棋种未知'}`} · {r.reason}</li>)}</ul></div>}
             {task.initial_frame_s !== null && task.initial_evidence_ids.length > 0 && <details className="initial-evidence"><summary>查看识别依据 · 视频 {timeText(task.initial_frame_s)}{task.initial_frame_s < task.start_s && '（前置画面，仅用于初始化）'}</summary><a href={`/api/tasks/${task.id}/evidence/${task.initial_evidence_ids[0]}`} target="_blank" rel="noreferrer"><img src={`/api/tasks/${task.id}/evidence/${task.initial_evidence_ids[0]}`} alt="初始局面识别使用的棋盘截图" /></a></details>}
@@ -361,12 +320,26 @@ export default function App() {
           </section>}</MotionRegion>
 
         </section>
-        <section className="panel steps-panel" style={replayHeight ? { height: replayHeight } : undefined}>
+        <section className="panel steps-panel">
           <MoveList task={task} step={step} onSelect={selectStep} selecting={selectingRange} boundaries={rangeSteps}
             onRecheck={chooseRange} disabled={!!locked || !!draft || !!reviewIndex || settingsChanged}
             onCancelSelection={() => { setSelectingRange(false); setRangeSteps([]); }} />
         </section>
       </div>
+      <MotionRegion show={!!task}>{task && <div className="studio-progress-grid"><section className="analysis-status studio-progress" aria-label="分析进度"><div role="status"><span className={task.status === 'analyzing' ? 'pulse-dot' : 'small-dot'} /><strong key={task.stage} className="stage-label">{task.stage}</strong></div>
+              <div><strong>视频扫描</strong><span>{Math.round(scanProgress)}%</span></div><div className="progress-track" role="progressbar" aria-label="视频扫描进度" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(scanProgress)}><i style={{ transform: `scaleX(${scanProgress / 100})` }} /></div><small>已扫描至 {timeText(scanTime)} / {timeText(task.end_s)} · 保存 {task.scan_events ?? 0} 个疑似变化事件</small>
+              <div><strong>局面处理</strong><span>{Math.round(progress)}%</span></div><div className="progress-track" role="progressbar" aria-label="局面处理进度" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(progress)}><i style={{ transform: `scaleX(${progress / 100})` }} /></div><small>已处理至 {timeText(task.recognition_video_s || task.processed_video_s)} · 最近确认落点 {timeText(confirmedTime)} · {intervals.length} 段待核对区间 · 待处理 {Math.max(task.pending_event_count ?? 0, task.recovery?.pending_request ? 1 : 0)} 个</small>
+              <MotionRegion show={task.tracking_state === 'recovering'}><p role="status">从 {timeText(task.tracking_since_s ?? confirmedTime)} 起{task.status === 'analyzing' || task.status === 'waiting_service' ? '正在重新同步' : '的画面仍需核对'}：{task.tracking_message ?? '等待连续清晰画面'}。已有棋谱保留，未确定区间继续保留供核对。</p></MotionRegion>
+              {task.rebuild_video_s != null && <p>正在重建至 {timeText(task.rebuild_video_s)}，目标 {timeText(task.rebuild_target_s ?? task.processed_video_s)}</p>}
+              {task.recovery?.request_started_at && <p>正在{task.recovery.phase === 'tls' ? '建立安全连接' : task.recovery.phase === 'upload' ? '发送截图' : task.recovery.phase === 'response' ? '等待模型响应' : '连接模型服务'}，已等待 {requestSeconds} 秒；已有扫描结果保留。</p>}
+              {task.status === 'analyzing' && task.recovery?.heartbeat_at && <small>后台最后活动：{Math.max(0, Math.floor(clock / 1000 - task.recovery.heartbeat_at))} 秒前</small>}
+            </section>
+          <RecheckPanel key={task.id} task={task} busy={busy || !!reviewIndex || !!draft || settingsChanged} onSelect={selectStep}
+            onCancel={() => void perform(async () => { setTask(await api.cancelRecheck(task)); })}
+            onApply={() => {
+              void perform(async () => { const latest = await api.get(task.id); const saved = await api.applyRecheck(latest); setTask(saved); setStep(saved.recheck?.left_index ?? 0); setReviewIndex(null); setReviewDraft(null); setDraft(null); setPicked(null); setInserting(false); setRangeSteps([]); setNotice('区间棋谱已更新，后续回放与导出使用修复后的顺序。'); }); }} />
+      </div>}</MotionRegion>
+      {task && <AnimatedDisclosure className="studio-export-details" title={<><Clapperboard size={16} /><span>对局录像与导出记录</span></>}><RecordingPanel key={task.id} task={task} intervalS={interval} toolbarTarget={exportTarget} /></AnimatedDisclosure>}
       <footer><span>棋局复刻 <i>·</i> 从影像中还原棋局</span><span>视频与复盘结果保存在本机</span></footer>
     </main>
   </div>;

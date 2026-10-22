@@ -41,7 +41,7 @@ class DeepPieceDetector:
             self.models.append(YOLO(str(path)))
         self.lock = threading.Lock()
 
-    def readings(self, image):
+    def readings(self, image, *, image_size=None):
         import torch
         from ultralytics.utils import ops
         cell, margin = board_geometry(image)
@@ -52,7 +52,8 @@ class DeepPieceDetector:
                 captured = []
                 handle = head.register_forward_hook(lambda layer, inputs, output: captured.append(output))
                 try:
-                    result = model.predict(image, conf=.2, device='cpu', verbose=False, save=False)[0]
+                    options = {'imgsz': image_size} if image_size is not None else {}
+                    result = model.predict(image, conf=.2, device='cpu', verbose=False, save=False, **options)[0]
                 finally:
                     handle.remove()
                 raw = captured[-1][1]['one2one']
@@ -84,3 +85,20 @@ class DeepPieceDetector:
                         readings[square] = {'class_probabilities': probabilities, 'confidence': confidence,
                                             'bbox': [float(x1), float(y1), float(x2), float(y2)]}
         return readings
+
+    def deep_readings(self, image):
+        readings = self.readings(image)
+        alternative = self.readings(image, image_size=640)
+        result = dict(readings)
+        for square, candidate in alternative.items():
+            previous = readings.get(square)
+            if previous is None:
+                result[square] = candidate
+                continue
+            a, b = previous['class_probabilities'], candidate['class_probabilities']
+            if (previous['confidence'] >= .75 and candidate['confidence'] >= .75
+                    and max(a, key=a.get) != max(b, key=b.get)):
+                result.pop(square, None)
+            elif candidate['confidence'] > previous['confidence']:
+                result[square] = candidate
+        return result

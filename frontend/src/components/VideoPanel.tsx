@@ -1,4 +1,5 @@
 import { useRef, useState, type RefObject } from 'react';
+import { Upload } from 'lucide-react';
 import type { Calibration, Task } from '../types';
 import { timeText } from '../types';
 import { gridPoint } from '../calibration';
@@ -29,7 +30,7 @@ export function VideoPanel({ task, videoRef, editing, calibration, setCalibratio
       onDragEnter={e => { e.preventDefault(); dragDepth.current++; if (!busy) setDragging(true); }}
       onDragLeave={() => { dragDepth.current = Math.max(0, dragDepth.current - 1); if (!dragDepth.current) setDragging(false); }}
       onDrop={e => { e.preventDefault(); dragDepth.current = 0; setDragging(false); const file = e.dataTransfer.files[0]; if (file && !busy) onUpload(file); }}>
-      <span className="upload-symbol"><svg width="31" height="31" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.4"><path d="M12 16V3m-5 5 5-5 5 5M4 14v6h16v-6" /></svg></span>
+      <span className="upload-symbol"><Upload size={31} strokeWidth={1.5} aria-hidden="true" /></span>
       <strong>{busy ? '正在上传与检查视频…' : '上传你的象棋录屏'}</strong><span>拖入视频，或点击选择文件</span><small>MP4 · 固定视角 · 棋盘完整可见 · 最大 2 GiB</small>
     </button> : <>
       <div className="video-stage">

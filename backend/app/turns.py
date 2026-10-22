@@ -40,6 +40,8 @@ def review_base(task, index):
     if index == 1:
         return task.initial_position
     for previous in reversed(task.moves[:index - 1]):
+        if previous.status == 'tentative' and previous.predicted_position is not None:
+            return previous.predicted_position
         if previous.tracking_anchor is not None:
             return previous.tracking_anchor
         if previous.status in ('auto_verified', 'corrected') and previous.position_after is not None:
@@ -85,6 +87,7 @@ class TurnReplay:
         self.task = task
         self.observed = initial
         self.before = initial
+        self._tracking_position = initial
         self.pending = None
         self.color = None
         self.touched = set()
@@ -101,6 +104,10 @@ class TurnReplay:
         self.evidence_times = {}
         self.returned_turn = None
         self.segment_turn_unknown = bool(task.moves and task.moves[-1].tracking_anchor is not None)
+
+    @property
+    def tracking_position(self):
+        return self._tracking_position
 
     def attach_evidence(self, check, ids, times):
         self.evidence_times.update(zip(ids, times))
@@ -140,7 +147,25 @@ class TurnReplay:
         if time_s < self.task.start_s:
             self.task.initial_position = after
             self.observed = self.before = after
+            self._tracking_position = after
             return
+        if (board_signature(self.observed) != board_signature(self._tracking_position)
+                and (board_check is None or board_check.status != 'conflict')):
+            try:
+                checked_snapshot(self._tracking_position, after, 1, 0, time_s)
+            except ValueError:
+                pass
+            else:
+                rejected, old_evidence = self.pending, list(self.evidence)
+                old_check, old_times = self.board_check, dict(self.evidence_times)
+                old_time = self.action_end_s or time_s
+                self.observed = self._tracking_position
+                self.color = None
+                self._reset()
+                if rejected is not None:
+                    self.uncertain(old_time, [rejected], old_evidence,
+                        '临时候选未通过走棋核验；后续清晰画面已从可靠局面重新确认')
+                    self.attach_evidence(old_check, old_evidence, [old_times.get(i) for i in old_evidence])
         if (self.pending is not None and self.violation is None and not self.note
                 and len(self.touched) == 1 and board_signature(after) == board_signature(self.before)
                 and board_signature(self.pending) != board_signature(self.before)):
@@ -165,6 +190,7 @@ class TurnReplay:
                 returned.timing_status = 'observed' if action_start_s is not None else 'uncertain'
                 self.returned_turn = (forward, returned)
                 self.observed = restored
+                self._tracking_position = restored
                 self.color = None
                 self._reset()
                 return
@@ -176,7 +202,9 @@ class TurnReplay:
             color = next(iter(colors))
             self.before = self.observed = self.observed.model_copy(update={'side_to_move': color})
             # 锚点的轮到方由新段第一处真实动作确定，不修改之前的棋谱。
-            self.task.moves[-1].tracking_anchor = self.before.model_copy(deep=True)
+            anchor = next((r for r in reversed(self.task.moves)
+                           if r.tracking_anchor is not None and r.tracking_anchor_s is not None), self.task.moves[-1])
+            anchor.tracking_anchor = self.before.model_copy(deep=True)
             self.segment_turn_unknown = False
         if colors == {'red', 'black'} and self.task.initial_turn_known:
             continuation = self.pending is not None and self.violation is None and any(
@@ -381,6 +409,14 @@ class TurnReplay:
                     record.violation, record.violation_note = 'takeback', self.note
                     record.related_steps = self.related
         self.observed = after
+        if not self.violation and not self.note and (board_check is None or board_check.status != 'conflict'):
+            try:
+                origin = self.before.model_copy(update={'side_to_move': self.color}) if self.color is not None else self.before
+                verified = checked_snapshot(origin, after, 1, 0, time_s)
+            except ValueError:
+                pass
+            else:
+                self._tracking_position = verified.position_after
 
     def reanchor(self, after, time_s, evidence, times):
         self.uncertain(time_s, [after], evidence, '中间操作未能完整还原；后续已从清晰画面重新同步，历史区间仍需人工审核')
@@ -390,6 +426,7 @@ class TurnReplay:
         record.tracking_anchor = after.model_copy(deep=True)
         record.tracking_anchor_s = time_s
         self.observed = after.model_copy(deep=True)
+        self._tracking_position = self.observed
         self.color = None
         self._reset()
         self.returned_turn = None
@@ -558,7 +595,7 @@ def revalidate_turns(task):
         record.position_before = before
         if not record.candidates and len(record.observed_positions) == 1:
             record.candidates = snapshot_candidates(before, record.observed_positions[0], index)
-        if record.status == 'needs_review':
+        if record.status == 'needs_review' or record.status == 'tentative' and record.predicted_position is not None:
             record.position_after = None
             continuous = False
             continue
@@ -699,6 +736,15 @@ def replay_corrections(task, start_index, preserve_unknown=False):
             record.position_after = None
             current = record.tracking_anchor.model_copy(deep=True)
             continue
+        if record.status == 'tentative' and record.predicted_position is not None and record.move is not None:
+            after, warning = unchecked_move(current, record.move)
+            record.position_before, record.predicted_position = current.model_copy(deep=True), after
+            record.position_after = None
+            record.reason = '推断走法已承接人工校正，仍需核对'
+            if warning:
+                record.violation_note = warning
+            current = after
+            continue
         if preserve_unknown and record.status in ('needs_review', 'tentative'):
             record.position_before = current.model_copy(deep=True)
             record.position_after = None
@@ -757,6 +803,7 @@ def renumber_records(task, index_map):
         for candidate in record.candidates:
             candidate.index = index
         record.related_steps = [index_map[i] for i in record.related_steps if i in index_map]
+        record.depends_on_steps = [index_map[i] for i in record.depends_on_steps if i in index_map]
 
 
 def insert_turn(task, index, action, time_s, action_start_s=None):
@@ -764,24 +811,23 @@ def insert_turn(task, index, action, time_s, action_start_s=None):
         raise ValueError('请先建立起始局面并选择插入位置')
     before = review_base(task, index)
     previous = task.moves[index - 2] if index > 1 else None
-    following = task.moves[index - 1] if index <= len(task.moves) else None
     lower = (previous.action_end_s if previous.action_end_s is not None else previous.video_end_s) if previous else task.start_s
-    upper = (following.action_start_s if following.action_start_s is not None else following.video_end_s) if following else task.metadata.duration_s
-    start = action_start_s if action_start_s is not None else time_s
-    if not lower <= start <= time_s <= upper:
-        raise ValueError('补棋动作及落子时间必须位于前一步落定与后一步起动之间')
-    if not any(p.id == action.piece_id and p.square == action.source for p in before.pieces):
-        raise ValueError('补棋起点与前一步保存局面不一致，请重新选择棋子')
+    if not 0 <= time_s <= task.metadata.duration_s:
+        raise ValueError('时间必须位于原视频范围内')
+    start = action_start_s if action_start_s is not None and action_start_s <= time_s else None
+    piece = next((p for p in before.pieces if p.id == action.piece_id), None)
+    if piece is None:
+        raise ValueError('所选棋子已不存在，请重新选择或在局面校正中添加')
     task = task.model_copy(deep=True)
     index_map = {r.index: r.index + (r.index >= index) for r in task.moves}
     from .actual import snapshot_record
-    action = action.model_copy(update={'index': index})
+    action = action.model_copy(update={'index': index, 'source': piece.square})
     after, _ = unchecked_move(before, action)
-    record = snapshot_record(before, after, index, lower, time_s)
+    record = snapshot_record(before, after, index, min(lower, start if start is not None else time_s), time_s)
     record.move, record.status, record.manual_override = action, 'corrected', True
     record.reason = '人工插入遗漏走棋'
     record.action_start_s, record.action_end_s = start, time_s
-    record.timing_status = 'observed' if action_start_s is not None else 'uncertain'
+    record.timing_status = 'observed' if start is not None else 'uncertain'
     task.moves.insert(index - 1, record)
     renumber_records(task, index_map)
     task.recheck = None
@@ -798,13 +844,12 @@ def correct_turn(task, index, actions, time_s=None, position=None):
         raise ValueError('前一处局面尚未确定，请先审核')
     original = task.moves[index - 1] if index <= len(task.moves) else None
     preceding = (task.moves[index - 2].action_end_s or task.moves[index - 2].video_end_s) if index > 1 else task.start_s
-    following = (task.moves[index].action_end_s or task.moves[index].video_end_s) if index < len(task.moves) else max(
-        task.end_s, task.evidence_end_s or 0, original.video_end_s if original is not None else 0,
-        original.action_end_s or 0 if original is not None else 0)
-    following = min(task.metadata.duration_s, following)
     time_s = time_s if time_s is not None else (original.action_end_s or original.video_end_s) if original else task.processed_video_s
-    if not preceding <= time_s <= following:
-        raise ValueError('落子时间必须位于前后步骤的时间范围内')
+    if original is not None and not actions and position is None:
+        time_s = original.action_end_s if original.action_end_s is not None else original.video_end_s
+    elif not 0 <= time_s <= task.metadata.duration_s:
+        raise ValueError('时间必须位于原视频范围内')
+    preceding = min(preceding, time_s)
     if len(actions) > 1:
         raise ValueError('一次审核只确认一步走棋，请选择一枚棋子及其最终落点')
     from .actual import snapshot_record
@@ -832,8 +877,10 @@ def correct_turn(task, index, actions, time_s=None, position=None):
         record.evidence_ids, record.observed_positions = original.evidence_ids, original.observed_positions
         record.tracking_anchor = original.tracking_anchor
         record.tracking_anchor_s = original.tracking_anchor_s
-        if record.tracking_anchor is not None and position is not None and time_s == record.tracking_anchor_s:
+        if record.tracking_anchor is not None and position is not None and (time_s == record.tracking_anchor_s
+                or original.move is None and original.predicted_position is not None):
             record.tracking_anchor = position.model_copy(deep=True)
+            record.tracking_anchor_s = time_s
         record.evidence_times_s = original.evidence_times_s
         record.violation, record.violation_note, record.related_steps = original.violation, original.violation_note, original.related_steps
         if time_s == (original.action_end_s if original.action_end_s is not None else original.video_end_s):

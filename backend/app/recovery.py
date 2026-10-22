@@ -213,7 +213,8 @@ class ReplayStore:
         return task
 
 
-def save_boundary_checkpoint(store, task, time_s, context, tracking_calibration=None, motion_active=False, motion_reference_s=None):
+def save_boundary_checkpoint(store, task, time_s, context, tracking_calibration=None, motion_active=False,
+                             motion_reference_s=None, motion_reference_calibration=None):
     backing = getattr(store, 'store', store)
     if task.recovery is None or not task.recovery.auto_run:
         return
@@ -227,6 +228,7 @@ def save_boundary_checkpoint(store, task, time_s, context, tracking_calibration=
     seed.resume_calibration = tracking_calibration
     seed.resume_motion_active = motion_active
     seed.resume_motion_reference_s = motion_reference_s
+    seed.resume_motion_reference_calibration = motion_reference_calibration
     seed.processed_video_s = time_s
     seed.recognition_video_s = time_s
     seed.recovery = None

@@ -124,6 +124,10 @@
 }
 @keyframes workspace-reveal { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
 @keyframes content-reveal { from { opacity: 0; } to { opacity: 1; } }
+.inferred-move-marker { animation: content-reveal 160ms ease-out; }
+.inference-notice { margin: 0 18px 6px; text-align: center; pointer-events: none; }
+.inference-notice .hint { margin: 0; padding: 5px 8px; color: #99672f; background: #fff6e6; border-radius: 5px; }
+@media (prefers-reduced-motion: reduce) { .inferred-move-marker { animation: none; } }
 @keyframes working-ring { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion:reduce) {
   .app-shell * { animation: none!important; transition: none!important; scroll-behavior: auto!important; }

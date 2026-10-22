@@ -51,11 +51,13 @@ def test_insertion_keeps_old_step_and_replays_shifted_suffix(tmp_path):
     assert task.moves[1].index == 2
 
 
-def test_insertion_rejects_timestamp_outside_neighbor_actions(tmp_path):
+def test_insertion_preserves_selected_time_outside_neighbor_actions(tmp_path):
     from app.turns import insert_turn
     task, _, actions = fixture_task(TaskStore(tmp_path))
-    with pytest.raises(ValueError, match='时间'):
-        insert_turn(task, 2, actions[1], 6.1, 5.9)
+    fixed = insert_turn(task, 2, actions[1], 6.1, 5.9)
+    assert fixed.moves[1].action_end_s == 6.1
+    assert fixed.moves[1].action_start_s == 5.9
+    assert fixed.moves[2].action_start_s == 6
 
 
 def test_range_sorts_click_order_and_requires_observed_boundaries(tmp_path):
@@ -119,6 +121,108 @@ def test_real_decoded_video_recovers_both_missing_moves_in_order(tmp_path):
     assert 3.4 <= moves[1].action_start_s <= 3.6
     assert progress[-1][1] == 50  # 1.0 <= t < 6.0 at ten frames/second
     assert all(r.evidence_ids for r in moves)
+
+
+def test_recheck_uses_tracking_cells_and_accumulated_transition_evidence(tmp_path, monkeypatch):
+    import app.recheck as recheck
+    from app.analysis import VideoEvent
+    from app.actual import _tracking_cells
+    from app.board_evidence import check_transition
+    store = TaskStore(tmp_path)
+    task, positions, _ = fixture_task(store)
+    path = store.task_dir(task.id) / 'source.mp4'
+    encode_clip(path, positions)
+    image = board_image(positions[2])
+    before_cells = {(f, r): None for f in range(9) for r in range(10)}
+    after_cells = dict(before_cells)
+    before_cells.update({(p.square.file, p.square.rank): p.color for p in positions[1].pieces})
+    after_cells.update({(p.square.file, p.square.rank): p.color for p in positions[2].pieces})
+    check = check_transition(positions[1], positions[2], before_cells, after_cells)
+    def events(frames, initial, confirmed_position, **kwargs):
+        # 正式跟踪器能保留未知格；原始起始观察器会把噪声误作占位证据。
+        assert kwargs['cell_reader'] is _tracking_cells
+        next(frames)
+        yield VideoEvent(3, [image, image], position=positions[2], action_start_s=2.5, board_check=check)
+        for _ in frames:
+            pass
+    monkeypatch.setattr(recheck, 'actual_events', events)
+    records, _ = recheck.trace_range(path, task.calibration, positions[1], 1, 6,
+        store.task_dir(task.id) / 'evidence', lambda *args: None)
+    move = next(r for r in records if r.move)
+    assert move.status == 'auto_verified'
+    assert move.board_check.status == 'verified'
+
+
+def test_recheck_recovers_later_moves_after_a_verified_visual_anchor(tmp_path, monkeypatch):
+    import app.recheck as recheck
+    from app.analysis import VideoEvent
+    store = TaskStore(tmp_path)
+    task, positions, _ = fixture_task(store)
+    path = store.task_dir(task.id) / 'source.mp4'
+    encode_clip(path, positions)
+    def events(frames, *args, **kwargs):
+        next(frames)
+        yield VideoEvent(2, [board_image(positions[1])], review_reason='遮挡，缺少动作证据')
+        yield VideoEvent(3, [board_image(positions[2])], position=positions[2], tracking_anchor=True, image_times_s=(3,))
+        yield VideoEvent(4, [board_image(positions[2]), board_image(positions[3])], position=positions[3], action_start_s=3.5)
+        for _ in frames:
+            pass
+    monkeypatch.setattr(recheck, 'actual_events', events)
+    records, _ = recheck.trace_range(path, task.calibration, positions[1], 1, 6,
+        store.task_dir(task.id) / 'evidence', lambda *args: None)
+    assert any(r.tracking_anchor is not None for r in records)
+    assert [r.move.piece_id for r in records if r.move and r.status == 'auto_verified'] == ['red_pawn_2']
+
+
+def test_deep_recheck_does_not_confirm_occluded_landing_with_conflicting_piece_identity(tmp_path, monkeypatch):
+    import app.recheck as recheck
+    import app.fusion
+    from types import SimpleNamespace
+    from app.analysis import VideoEvent
+    from app.schemas import BoardCheck
+    store = TaskStore(tmp_path)
+    task, positions, _ = fixture_task(store)
+    path = store.task_dir(task.id) / 'source.mp4'
+    encode_clip(path, positions)
+    detector = SimpleNamespace(readings=lambda image: {}, deep_readings=lambda image: {
+        (0, 4): {'confidence': .95, 'class_probabilities': {'red_rook': .99}}})
+    monkeypatch.setenv('VISION_FUSION', '1')
+    monkeypatch.setattr(app.fusion, 'local_fusion_classifier', lambda: SimpleNamespace(detector=detector))
+    def events(frames, *args, **kwargs):
+        next(frames)
+        yield VideoEvent(3, [board_image(positions[1]), board_image(positions[2])], position=positions[2],
+                         action_start_s=2.5, board_check=BoardCheck(status='partial', visible_before=88, visible_after=88))
+        for _ in frames:
+            pass
+    monkeypatch.setattr(recheck, 'actual_events', events)
+    records, _ = recheck.trace_range(path, task.calibration, positions[1], 1, 6,
+        store.task_dir(task.id) / 'evidence', lambda *args: None)
+    assert not any(r.move and r.status == 'auto_verified' for r in records)
+    assert any('身份' in r.reason for r in records)
+
+
+def test_deep_anchor_recovers_a_single_move_with_previously_observed_onset(tmp_path, monkeypatch):
+    import app.recheck as recheck
+    from app.analysis import VideoEvent
+    store = TaskStore(tmp_path)
+    task, positions, _ = fixture_task(store)
+    path = store.task_dir(task.id) / 'source.mp4'
+    encode_clip(path, positions)
+    def events(frames, *args, **kwargs):
+        next(frames)
+        yield VideoEvent(1, [board_image(positions[1])], position=positions[1])
+        yield VideoEvent(3, [board_image(positions[1]), board_image(positions[2])], position=positions[2],
+                         action_start_s=2.5, review_reason='落点仍被遮挡')
+        yield VideoEvent(3.4, [board_image(positions[2]), board_image(positions[2])], position=positions[2],
+                         tracking_anchor=True, image_times_s=(3.2, 3.4))
+        for _ in frames:
+            pass
+    monkeypatch.setattr(recheck, 'actual_events', events)
+    records, _ = recheck.trace_range(path, task.calibration, positions[1], 1, 6,
+        store.task_dir(task.id) / 'evidence', lambda *args: None)
+    move = next(r for r in records if r.move and r.status == 'auto_verified')
+    assert move.move.piece_id == 'black_pawn_0'
+    assert (move.action_start_s, move.action_end_s) == (2.5, 3.2)
 
 
 def test_insert_route_does_not_replace_selected_step(tmp_path):

@@ -58,6 +58,8 @@ export function displayStep(task: Task, index: number): number {
 }
 export function positionAt(task: Task, step: number): Position | null {
   if (step === 0) return task.initial_position;
+  const inferred = task.moves[step - 1];
+  if (inferred?.status === 'tentative' && inferred.predicted_position) return inferred.predicted_position;
   if (task.replay_mode === 'actual' || task.moves.some(r => r.manual_override)) {
     const record = task.moves[step - 1];
     if (record?.tracking_anchor) return record.tracking_anchor;
@@ -77,10 +79,13 @@ export function previousStep(task: Task, step: number): number {
 }
 export function stepAtVideoTime(task: Task, timeS: number): number {
   let step = 0;
+  let latestTime = -Infinity;
   for (const record of task.replay_mode === 'actual' || task.moves.some(r => r.manual_override) ? task.moves : task.moves.slice(0, task.confirmed_prefix_length)) {
     if (isIgnored(record) && !record.tracking_anchor) continue;
-    if ((record.tracking_anchor_s ?? record.action_end_s ?? record.video_end_s) > timeS) break;
-    if (positionAt(task, record.index)) step = record.index;
+    const landingTime = record.tracking_anchor_s ?? record.action_end_s ?? record.video_end_s;
+    if (landingTime <= timeS && landingTime >= latestTime && positionAt(task, record.index)) {
+      step = record.index; latestTime = landingTime;
+    }
   }
   return step;
 }
@@ -91,18 +96,18 @@ export function lastKnownStep(task: Task): number {
 }
 export function positionBefore(task: Task, index: number): Position | null {
   if (index === 1) return task.initial_position;
-  const saved = task.moves[index - 2];
-  if (saved?.tracking_anchor) return saved.tracking_anchor;
-  if (saved && ['auto_verified', 'corrected'].includes(saved.status) && saved.position_after) return saved.position_after;
-  if (task.rules_enabled) {
-    const record = task.moves[index - 1];
-    if (record?.position_before) return record.position_before;
-    const previous = task.moves[index - 2];
-    if (previous?.observed_positions?.length === 1) return previous.observed_positions[0];
+  const previousRecords = task.moves.slice(0, index - 1).reverse();
+  for (const previous of previousRecords) {
+    if (previous.status === 'tentative' && previous.predicted_position) return previous.predicted_position;
+    if (previous.tracking_anchor) return previous.tracking_anchor;
+    if (['auto_verified', 'corrected'].includes(previous.status) && previous.position_after) return previous.position_after;
+    if (!isIgnored(previous)) break;
   }
-  for (let step = index - 1; step >= 0; step--) {
-    const position = positionAt(task, step);
-    if (position) return position;
+  const record = task.moves[index - 1];
+  if (record?.position_before) return record.position_before;
+  for (const previous of previousRecords) {
+    if (previous.position_after) return previous.position_after;
+    if (previous.observed_positions?.length === 1) return previous.observed_positions[0];
   }
-  return null;
+  return task.initial_position;
 }
