@@ -54,6 +54,19 @@ def test_inference_inherits_identity_with_missing_stationary_pieces():
     assert next(p for p in result[-1].predicted_position.pieces if p.id == 'black_rook_0').kind == 'rook'
 
 
+def test_inferred_move_serializes_concrete_estimated_video_time():
+    from app.move_inference import MoveInference
+    from app.schemas import MoveRecord
+    before = opening_position()
+    after = play(before, 'red_horse_1', (2, 7))
+    record = MoveInference(before, 7).observe(15.8, occupied(after))[-1]
+    restored = MoveRecord.model_validate_json(record.model_dump_json())
+    assert restored.timing_status == 'estimated'
+    assert restored.action_end_s == 15.8
+    assert restored.video_end_s == 15.8
+    assert restored.predicted_position == after
+
+
 def test_inference_ignores_isolated_false_empty_without_deleting_piece():
     from app.move_inference import MoveInference
     before = opening_position()
@@ -265,6 +278,7 @@ def test_confirmed_inferred_prefix_cannot_disappear_or_be_downgraded():
     first = play(before, 'red_rook_0', (0, 8))
     reply = play(first, 'black_horse_1', (2, 2))
     inference = MoveInference(before, 0)
+    inference.observe(0, occupied(before))
     inference.observe(1, occupied(first))
     previous = inference.observe(2, occupied(first))
     following = inference.observe(3, occupied(reply))
@@ -354,7 +368,7 @@ def test_actual_tail_requires_direct_departure_before_selection_end(tmp_path, mo
     record = MoveRecord(index=1, move=move, status='tentative', position_before=before,
         predicted_position=first, video_start_s=0, video_end_s=.8, action_end_s=.8)
     tail_calls = []
-    def observe(self, time_s, cells, *, tail_only=False):
+    def observe(self, time_s, cells, *, tail_only=False, identities=None):
         result = record.model_copy(deep=True)
         if tail_only:
             tail_calls.append(time_s)
@@ -504,8 +518,6 @@ def test_actual_reader_persists_uncertain_snapshot_and_continues_after_restart(t
             self.attempts += 1
             self.check_count += 1
             self.next_check_s = time_s + 1
-            if resume:
-                return observed
         def reset(self):
             self.requested = False
     monkeypatch.setenv('VISION_FUSION', '1')
