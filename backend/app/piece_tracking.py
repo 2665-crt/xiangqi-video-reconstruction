@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from functools import lru_cache
 
 import cv2
 import numpy as np
@@ -6,6 +7,20 @@ import numpy as np
 from .board_colors import skin_surface_mask, wood_surface_mask
 from .schemas import Piece
 from .board_observation import BoardObservation
+from .numerical import track_radius, track_collisions
+
+
+@lru_cache(maxsize=64)
+def _piece_masks(radius, padding):
+    extent = radius + padding
+    yy, xx = np.mgrid[-extent:extent + 1, -extent:extent + 1]
+    distance = xx ** 2 + yy ** 2
+    core = distance < (radius * .7) ** 2
+    ring = (distance >= (radius * .7) ** 2) & (distance <= (radius + 2) ** 2)
+    mask = np.uint8(ring) * 255
+    for array in (core, ring, mask):
+        array.setflags(write=False)
+    return core, ring, mask
 
 
 @dataclass
@@ -42,26 +57,16 @@ class PieceTracker:
 
     def _face(self, center, radius=None):
         x, y = center
-        radii = range(14, 31) if radius is None else range(max(12, radius - 2), min(32, radius + 3))
-        best = None
-        for r in radii:
-            ring = np.rint(center + self.circle * r).astype(int)
-            if (np.any(ring < 0) or np.any(ring[:, 0] >= self.current_gray.shape[1])
-                    or np.any(ring[:, 1] >= self.current_gray.shape[0])):
-                continue
-            support = np.mean(self.edges[ring[:, 1], ring[:, 0]] > 0)
-            if best is None or support > best[0]:
-                best = support, r
-        if best is None or best[0] < .65:
+        best = track_radius(self.edges, center, self.circle, 0 if radius is None else radius)
+        if best < 0:
             return None
-        r = best[1] if radius is None else radius
+        r = best if radius is None else radius
         extent = r + 3
         if (x < extent or y < extent or x >= self.current_gray.shape[1] - extent
                 or y >= self.current_gray.shape[0] - extent):
             return None
         patch = cv2.getRectSubPix(self.hsv, (2 * extent + 1, 2 * extent + 1), (float(x), float(y)))
-        yy, xx = np.mgrid[-extent:extent + 1, -extent:extent + 1]
-        core = xx ** 2 + yy ** 2 < (r * .7) ** 2
+        core, ring, mask = _piece_masks(r, 3)
         if np.mean((patch[..., 1][core] < 120) & (patch[..., 2][core] > 80)) < .5:
             return None
         skin = skin_surface_mask(patch)
@@ -70,7 +75,6 @@ class PieceTracker:
             return None
         appearance = cv2.getRectSubPix(self.current_gray, (2 * extent + 1, 2 * extent + 1), (float(x), float(y)))
         # 中央字迹不参与身份匹配，保留圆盘边缘及其邻域。
-        ring = (xx ** 2 + yy ** 2 >= (r * .7) ** 2) & (xx ** 2 + yy ** 2 <= (r + 2) ** 2)
         values = appearance[ring].astype(np.float32)
         values -= values.mean()
         length = np.linalg.norm(values)
@@ -78,7 +82,7 @@ class PieceTracker:
             return None
         template = np.zeros_like(appearance, dtype=np.float32)
         template[ring] = values / length
-        return r, values / length, template, np.uint8(ring) * 255
+        return r, values / length, template, mask
 
     def _refine(self, center, track):
         size = track.template.shape[0] + 6
@@ -93,13 +97,11 @@ class PieceTracker:
         extent = radius + 4
         patch = cv2.getRectSubPix(self.current_gray, (extent * 2 + 1, extent * 2 + 1),
                                   (float(center[0]), float(center[1])))
-        yy, xx = np.mgrid[-extent:extent + 1, -extent:extent + 1]
-        distance = xx ** 2 + yy ** 2
-        mask = np.uint8((distance >= (radius * .7) ** 2) & (distance <= (radius + 2) ** 2)) * 255
+        _, _, mask = _piece_masks(radius, 4)
         points = cv2.goodFeaturesToTrack(patch, 16, .01, 3, mask=mask)
         return None if points is None or len(points) < 4 else points + np.float32(center - extent)
 
-    def observe(self, time_s, image, position, cells, *, allow_reseed=True):
+    def observe(self, time_s, image, position, cells, *, allow_reseed=True, prepared=None):
         if image.shape[0] <= image.shape[1]:
             self.observation.cells = dict(cells)
             self.identities, self.tokens = {}, {}
@@ -115,7 +117,7 @@ class PieceTracker:
                 if identity in self.trusted:
                     track.piece = self.trusted[identity]
         original_cells = cells
-        cells = self.observation.update(image, position, cells)
+        cells = self.observation.update(image, position, cells, prepared=prepared)
         self.current_gray, self.hsv, self.edges = self.observation.gray, self.observation.hsv, self.observation.edges
         for identity, piece in self.trusted.items():
             square = piece.square.file, piece.square.rank
@@ -182,11 +184,9 @@ class PieceTracker:
                     self.tracks[identity] = PieceTrack(piece.model_copy(deep=True), center, radius,
                         appearance, template, mask, points, self.generation, time_s, center.copy())
         active = [(identity, track) for identity, track in self.tracks.items() if track.points is not None]
-        collisions = set()
-        for i, (identity, track) in enumerate(active):
-            for other, candidate in active[i + 1:]:
-                if np.linalg.norm(track.center - candidate.center) < max(track.radius, candidate.radius) * 1.5:
-                    collisions.update((identity, other))
+        centers = np.asarray([track.center for _, track in active], dtype=np.float32).reshape(-1, 2)
+        radii = np.asarray([track.radius for _, track in active], dtype=np.int64)
+        collisions = {identity for (identity, _), colliding in zip(active, track_collisions(centers, radii)) if colliding}
         proof, self.identities = {}, {}
         for identity, track in active:
             if identity in collisions:

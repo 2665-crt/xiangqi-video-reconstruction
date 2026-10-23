@@ -74,13 +74,13 @@ def _base_tracking_cells(image, reference=None):
         return dict(cached[1])
     prepared = cache.get((id(image), 'prepared'))
     if prepared is not None and prepared[0]() is image:
-        raw, normal, enhanced = prepared[1]
+        raw, normal, enhanced = prepared[1][:3]
         reference_cells = {(p.square.file, p.square.rank): p.color for p in reference.pieces} if reference is not None else None
         changed = reference_cells is not None and any(reference_cells.get(s) != c for s, c in raw.items())
         if len(raw) < 90 or changed:
             if enhanced is None:
                 enhanced = _finish_tracking_cells(image, raw, True)
-                cache[id(image), 'prepared'] = weakref.ref(image), (raw, normal, enhanced)
+                cache[id(image), 'prepared'] = weakref.ref(image), (raw, normal, enhanced, *prepared[1][3:])
             cells = dict(enhanced)
         else:
             cells = dict(normal)
@@ -169,6 +169,7 @@ def _filter_reference_cells(small, cells, reference_cells, raw_cells):
 
 def _prepare_tracking_frame(item, tracking_calibration, scan_calibration, scan_end, scan_needed):
     from .analysis import read_board_cells
+    from .board_observation import BoardObservation
     time_s, frame, decoding, reference_cells, *calibrations = item
     if calibrations:
         tracking_calibration = calibrations[0]
@@ -180,7 +181,8 @@ def _prepare_tracking_frame(item, tracking_calibration, scan_calibration, scan_e
     enhanced = _finish_tracking_cells(image, raw, True) if len(raw) < 90 or changed else None
     normal = _finish_tracking_cells(image, raw, False) if len(raw) == 90 else enhanced
     scan_image = rectify_board(frame, scan_calibration, margin=50) if scan_needed and time_s <= scan_end + 1e-6 else None
-    return time_s, image, scan_image, (raw, normal, enhanced), decoding
+    observation = BoardObservation.prepare(image, compact=True) if image.shape[0] > image.shape[1] else None
+    return time_s, image, scan_image, (raw, normal, enhanced, observation), decoding
 
 
 def verified_initial_candidates(candidates, images):
@@ -1079,6 +1081,7 @@ def analyze_actual(task, store, vision):
             while True:
                 decoding = monotonic()
                 image = None
+                prepared_observation = None
                 try:
                     if prepared_frames is None:
                         time_s, frame = next(frames)
@@ -1086,6 +1089,7 @@ def analyze_actual(task, store, vision):
                         scan.consume(time_s, frame)
                     else:
                         time_s, image, scan_image, variants, decoding_seconds = next(prepared_frames)
+                        prepared_observation = variants[3]
                         task.run_stats.decode_seconds += decoding_seconds
                         scan.consume(time_s, None, board_image=scan_image)
                         image.setflags(write=False)
@@ -1158,7 +1162,7 @@ def analyze_actual(task, store, vision):
                 image.setflags(write=False)
                 observations = _tracking_cells(image, current)
                 proof = piece_tracker.observe(time_s, image, current, observations,
-                                              allow_reseed=inference is None)
+                                              allow_reseed=inference is None, prepared=prepared_observation)
                 _tracking_cache.get()[id(image), 'identity'] = (weakref.ref(image), proof,
                     piece_tracker.identities, piece_tracker.tokens, piece_tracker.observation.cells)
                 _trim_tracking_cache(_tracking_cache.get())
@@ -1190,9 +1194,10 @@ def analyze_actual(task, store, vision):
                     process = partial(_prepare_tracking_frame, tracking_calibration=tracking_calibration,
                                       scan_calibration=scan.calibration, scan_end=task.end_s,
                                       scan_needed=scan.available and not scan.index['complete'])
-                    cv2.setNumThreads(1)
+                    frame_workers = min(8, max(1, (os.cpu_count() or 2) // 2))
+                    cv2.setNumThreads(min(4, frame_workers) if scan.available else 1)
                     prepare = process_frames if scan.available else parallel_batches
-                    prepared_frames = preprocessing_stack.enter_context(prepare(remaining(), process))
+                    prepared_frames = preprocessing_stack.enter_context(prepare(remaining(), process, workers=frame_workers))
         last_end, pending_review = task.start_s, None
         recovery_reader = None
         visual_recovery = None

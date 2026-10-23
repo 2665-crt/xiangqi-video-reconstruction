@@ -15,9 +15,16 @@ class BoardObservation:
         self.fitted = False
         self.centers = {}
         self.initial = None
+        self._inverse_source = None
+        self._inverse_matrix = None
 
     def project(self, points, inverse=False):
-        matrix = np.linalg.inv(self.matrix) if inverse else self.matrix
+        matrix = self.matrix
+        if inverse:
+            if self._inverse_source is None or not np.array_equal(self.matrix, self._inverse_source):
+                self._inverse_matrix = np.linalg.inv(self.matrix)
+                self._inverse_source = self.matrix.copy()
+            matrix = self._inverse_matrix
         return cv2.perspectiveTransform(np.float32(points).reshape(-1, 1, 2), matrix)[:, 0]
 
     def _circles(self, gray, edges, max_radius, support):
@@ -77,9 +84,7 @@ class BoardObservation:
             return
         self.matrix, self.fitted = matrix, True
 
-    def update(self, image, position, base_cells):
-        if self.initial is None:
-            self.initial = position.model_copy(deep=True)
+    def _prepare_image(self, image):
         cell, margin = board_geometry(image)
         scale = 50 / cell
         self.origin = margin * scale
@@ -88,13 +93,37 @@ class BoardObservation:
         self.hsv = cv2.cvtColor(self.small, cv2.COLOR_BGR2HSV)
         edges = cv2.Canny(self.gray, 50, 120)
         self.edges = cv2.dilate(edges, np.ones((3, 3), np.uint8))
-        blurred = cv2.GaussianBlur(self.gray, (5, 5), 1)
-        circles = self._circles(blurred, edges, 27, .6)
+        return cv2.GaussianBlur(self.gray, (5, 5), 1), edges
+
+    @classmethod
+    def prepare(cls, image, *, compact=False):
+        observation = cls()
+        blurred, edges = observation._prepare_image(image)
+        primary = observation._circles(blurred, edges, 27, .6)
+        secondary = observation._circles(blurred, edges, 32, .8)
+        if compact:
+            return primary, secondary
+        return (observation.origin, observation.small, observation.gray, observation.hsv,
+                observation.edges, primary, secondary)
+
+    def update(self, image, position, base_cells, *, prepared=None):
+        if self.initial is None:
+            self.initial = position.model_copy(deep=True)
+        if prepared is None:
+            blurred, edges = self._prepare_image(image)
+            circles = self._circles(blurred, edges, 27, .6)
+        elif len(prepared) == 2:
+            self._prepare_image(image)
+            circles, secondary = prepared
+        else:
+            self.origin, self.small, self.gray, self.hsv, self.edges, circles, secondary = prepared
         if not self.fitted:
             self._fit(circles, self.initial)
         primary_count = len(circles)
         if self.fitted:
-            circles = np.concatenate((circles, self._circles(blurred, edges, 32, .8)))
+            if prepared is None:
+                secondary = self._circles(blurred, edges, 32, .8)
+            circles = np.concatenate((circles, secondary))
         cells = dict(base_cells)
         self.centers = {}
         quality = {}
