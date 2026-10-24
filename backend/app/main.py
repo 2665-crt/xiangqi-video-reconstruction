@@ -20,6 +20,7 @@ from .vision import VisionClient
 from .storage import RevisionConflict, TaskStore
 from .recovery import RecoveryCoordinator, prepare_recovery, run_saved_operation
 from .video import iter_frames, probe_video, save_image
+from .resources import ResourceMonitor
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 load_dotenv(PROJECT_ROOT / ".env")
@@ -43,6 +44,7 @@ def create_app(data_root: Path | None = None, recording_root: Path | None = None
     recheck_threads = {}
     analysis_lock = threading.Lock()
     vision_runtime_lock = threading.Lock()
+    resources = ResourceMonitor()
 
     def stop_worker(task_id, manual=True):
         task = store.get(task_id)
@@ -87,7 +89,9 @@ def create_app(data_root: Path | None = None, recording_root: Path | None = None
     async def lifespan(app):
         store.recover_interrupted()
         recovery.start()
+        resources.start()
         yield
+        resources.close()
         for task_id in list(recheck_threads):
             current = store.get(task_id)
             if current.recheck is not None and current.recheck.status == 'running':
@@ -103,6 +107,11 @@ def create_app(data_root: Path | None = None, recording_root: Path | None = None
     app.state.analysis_workers = workers
     app.state.recordings = recordings
     app.state.recovery = recovery
+    app.state.resources = resources
+
+    @app.get('/api/resources')
+    def resource_usage():
+        return resources.snapshot()
 
     def get_task(task_id):
         try:

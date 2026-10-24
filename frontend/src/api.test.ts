@@ -4,6 +4,15 @@ import type { Task } from './types';
 
 afterEach(() => vi.unstubAllGlobals());
 
+test('resource statistics use a read-only API request', async () => {
+  expect(api).toHaveProperty('resources');
+  const fetch = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ cpu_total_percent: 100 }) });
+  vi.stubGlobal('fetch', fetch);
+  const resources = (api as unknown as { resources: () => Promise<{ cpu_total_percent: number }> }).resources;
+  expect((await resources()).cpu_total_percent).toBe(100);
+  expect(fetch).toHaveBeenCalledWith('/api/resources', undefined);
+});
+
 test('resume preserves the saved operation instead of starting a new analysis', async () => {
   expect(api).toHaveProperty('resume');
   const fetch = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ status: 'waiting_service' }) });

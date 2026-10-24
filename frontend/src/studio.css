@@ -49,6 +49,22 @@
 .studio .save-state { display: inline-flex; align-items: center; gap: 6px; padding: 5px 9px; border-radius: 5px; background: #edece4d9; color: #6c746e; font-size: 12px; white-space: nowrap; }
 .studio .save-state.online { background: #e4ede5df; color: var(--jade); }
 .studio .header-actions { gap: 22px; }
+.studio .cpu-monitor { flex: 0 0 260px; padding: 9px 12px; border: 1px solid #b9c9ba9c; border-radius: 8px; background: #f3f6eedb; color: var(--jade); font-size: 11px; transition: background-color .2s ease, border-color .2s ease; animation: cpu-appear .2s ease-out; }
+.studio .cpu-heading { display: flex; align-items: center; gap: 5px; white-space: nowrap; }
+.studio .cpu-heading strong { font-size: 11px; font-weight: 600; }
+.studio .cpu-heading > span { margin-left: auto; color: #708174; font-size: 9px; }
+.studio .cpu-monitor dl { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin: 7px 0 0; }
+.studio .cpu-monitor dl > div { display: grid; gap: 2px; }
+.studio .cpu-monitor dt { color: #728074; font-size: 10px; }
+.studio .cpu-monitor dd { margin: 0; min-width: 6ch; font-size: 13px; font-variant-numeric: tabular-nums; font-weight: 600; }
+.studio .cpu-unavailable { border-color: #c7beb0; background: #f3f0e8; }
+.studio .cpu-unavailable .cpu-heading > span { color: #8b7353; }
+@keyframes cpu-appear { from { opacity: 0; transform: translateY(-3px); } to { opacity: 1; transform: translateY(0); } }
+@media (max-width: 1450px) and (min-width: 1101px) {
+  .app-shell.studio .topbar { flex-wrap: wrap; height: auto; min-height: 94px; padding-top: 14px; padding-bottom: 14px; gap: 12px 20px; }
+  .studio .header-actions { width: 100%; justify-content: flex-start; }
+  .studio .cpu-monitor { margin-left: auto; }
+}
 .studio .task-picker { display: flex; align-items: center; gap: 9px; color: #314c40; }
 .studio .task-picker select { margin: 0; width: 168px; max-width: 190px; border: 0; background: #fffdf570; color: #34483e; padding: 9px 4px; font-size: 13px; text-overflow: ellipsis; }
 .studio .studio-export { position: relative; }
@@ -219,6 +235,8 @@
   .studio .board-toolbar { flex-wrap: wrap; justify-content: space-between; }
 }
 @media (max-width: 600px) {
+  .studio .header-actions { flex-wrap: wrap; gap: 10px; }
+  .studio .cpu-monitor { flex-basis: 100%; }
   .studio::before { background-position: 70% center; }
   .studio .brand strong { font-size: 24px; }
   .studio .brand small { font-size: 7px; }

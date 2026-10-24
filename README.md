@@ -6,11 +6,13 @@
 
 ## 下载免安装版
 
-打开 [最新 Release](https://github.com/2665-crt/xiangqi-video-reconstruction/releases/latest)，在 **Assets** 中下载 `XiangQi-Vedio-Reconstruction-0.2.0-win-x64.zip`（约 645 MiB）。
+打开 [最新 Release](https://github.com/2665-crt/xiangqi-video-reconstruction/releases/latest)，在 **Assets** 中下载 `XiangQi-Vedio-Reconstruction-0.3.0-win-x64.zip`。
 
 1. 将整个 ZIP 解压到可写目录。
 2. 双击 `XiangQi Vedio Reconstruction.exe`，等待本地模型加载。
 3. 上传 MP4，按界面完成棋盘定位、初始局面核对和分析；可人工校正并导出棋盘录像。
+
+再次双击 EXE 可打开独立窗口，分别处理和保存任务；当前已实测双窗口。右上角每秒显示整机与本窗口 CPU 占用。起始局面有疑点时立即显示核对入口，保存初始棋局后继续解析。版本变化及验收范围见 [v0.3.0 发布说明](docs/releases/v0.3.0.md)。
 
 保留 EXE 旁的全部文件，不要只复制 EXE。便携版无需安装 Python、Node.js 或 Chrome。任务保存在应用目录的 `data`，导出录像在 `录屏存放`；移动应用时请保留这两个目录。GitHub 自动生成的 **Source code** ZIP 是源码包，直接使用请选择上面的便携包。
 

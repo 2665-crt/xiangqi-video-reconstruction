@@ -1,4 +1,4 @@
-import type { Calibration, Move, Position, RecordingJob, Task, TaskSummary } from './types';
+import type { Calibration, Move, Position, RecordingJob, ResourceUsage, Task, TaskSummary } from './types';
 
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
   const response = await fetch(url, options);
@@ -10,6 +10,7 @@ async function request<T>(url: string, options?: RequestInit): Promise<T> {
 }
 const json = (method: string, body: unknown): RequestInit => ({ method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
 export const api = {
+  resources: (signal?: AbortSignal) => request<ResourceUsage>('/api/resources', signal ? { signal } : undefined),
   health: () => request<{ status: string; vision_configured: boolean; detail?: string }>('/api/health'),
   list: () => request<TaskSummary[]>('/api/tasks'),
   get: (id: string) => request<Task>(`/api/tasks/${id}`),

@@ -64,3 +64,28 @@ def test_recording_command_preserves_paths_with_spaces_and_unicode(monkeypatch):
         'C:/应用/XiangQi Vedio Reconstruction.exe', '--recording-render',
         'C:/任务/a b.json', 'http://127.0.0.1:12345/recording-render',
     ]
+
+
+def test_desktop_data_lock_rejects_a_second_backend_and_releases_on_close(tmp_path):
+    from desktop import backend_entry
+    assert hasattr(backend_entry, 'acquire_data_lock')
+    import pytest
+    owner = backend_entry.acquire_data_lock(tmp_path)
+    try:
+        with pytest.raises(OSError):
+            backend_entry.acquire_data_lock(tmp_path)
+    finally:
+        owner.close()
+    reopened = backend_entry.acquire_data_lock(tmp_path)
+    reopened.close()
+
+
+def test_desktop_probe_checks_the_actual_lock_without_importing_models(tmp_path):
+    import subprocess
+    import sys
+    from pathlib import Path
+    from desktop import backend_entry
+    command = [sys.executable, str(Path(backend_entry.__file__)), '--probe-data-root', str(tmp_path)]
+    with backend_entry.acquire_data_lock(tmp_path):
+        assert subprocess.run(command, capture_output=True).returncode == 73
+    assert subprocess.run(command, capture_output=True).returncode == 0

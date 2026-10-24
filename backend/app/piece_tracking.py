@@ -8,6 +8,7 @@ from .board_colors import skin_surface_mask, wood_surface_mask
 from .schemas import Piece
 from .board_observation import BoardObservation
 from .numerical import track_radius, track_collisions
+from .tracking_batch import flow_metrics, face_surface, surface_tables, binary_surfaces, native_surfaces
 
 
 @lru_cache(maxsize=64)
@@ -67,12 +68,18 @@ class PieceTracker:
             return None
         patch = cv2.getRectSubPix(self.hsv, (2 * extent + 1, 2 * extent + 1), (float(x), float(y)))
         core, ring, mask = _piece_masks(r, 3)
-        if np.mean((patch[..., 1][core] < 120) & (patch[..., 2][core] > 80)) < .5:
-            return None
-        skin = skin_surface_mask(patch)
-        wood = wood_surface_mask(patch)
-        if skin is not None and skin[core].mean() > .08 or wood is not None and wood[core].mean() > .5:
-            return None
+        native_colors = native_surfaces(skin_surface_mask, wood_surface_mask)
+        tables = surface_tables() if native_colors else (None, None)
+        if native_colors and binary_surfaces(tables):
+            if not face_surface(patch, core, *tables):
+                return None
+        else:
+            if np.mean((patch[..., 1][core] < 120) & (patch[..., 2][core] > 80)) < .5:
+                return None
+            skin = skin_surface_mask(patch)
+            wood = wood_surface_mask(patch)
+            if skin is not None and skin[core].mean() > .08 or wood is not None and wood[core].mean() > .5:
+                return None
         appearance = cv2.getRectSubPix(self.current_gray, (2 * extent + 1, 2 * extent + 1), (float(x), float(y)))
         # 中央字迹不参与身份匹配，保留圆盘边缘及其邻域。
         values = appearance[ring].astype(np.float32)
@@ -135,21 +142,17 @@ class PieceTracker:
                 winSize=(15, 15), maxLevel=2)
             valid = ((status.ravel() > 0) & (reverse.ravel() > 0)
                      & (np.linalg.norm(points - backward, axis=2).ravel() < 1))
-            offset = 0
-            for _, track in active:
+            shifts, spreads, kept = flow_metrics(points, following, valid,
+                                                  np.asarray([len(track.points) for _, track in active], np.int64))
+            for index, (_, track) in enumerate(active):
                 count = len(track.points)
-                keep = valid[offset:offset + count]
-                new_points = following[offset:offset + count][keep]
-                old_points = track.points[keep]
-                offset += count
-                if len(new_points) < max(4, count * .5):
+                if kept[index] < max(4, count * .5):
                     track.points = None
                     continue
-                delta = (new_points - old_points)[:, 0]
-                shift = np.median(delta, axis=0)
+                shift = shifts[index]
                 center = self._refine(track.center + shift, track)
                 face = self._face(center, track.radius) if center is not None else None
-                if (np.linalg.norm(shift) > 30 or np.median(np.linalg.norm(delta - shift, axis=1)) > 1.5
+                if (np.linalg.norm(shift) > 30 or spreads[index] > 1.5
                         or face is None or float(face[1] @ track.appearance) < .65):
                     track.points = None
                     continue
@@ -188,11 +191,11 @@ class PieceTracker:
         radii = np.asarray([track.radius for _, track in active], dtype=np.int64)
         collisions = {identity for (identity, _), colliding in zip(active, track_collisions(centers, radii)) if colliding}
         proof, self.identities = {}, {}
-        for identity, track in active:
+        projected = self.observation.project(centers, inverse=True) if active else []
+        for (identity, track), logical in zip(active, projected):
             if identity in collisions:
                 track.points = None
                 continue
-            logical = self.observation.project([track.center], inverse=True)[0]
             file, rank = np.rint((logical - self.observation.origin) / 50).astype(int)
             square = int(file), int(rank)
             if (not (0 <= file < 9 and 0 <= rank < 10)

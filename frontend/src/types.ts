@@ -98,3 +98,14 @@ export function isAutomaticRecord(record: MoveRecord): boolean {
 export function isPredictedRecord(record: MoveRecord | undefined): boolean {
   return record?.status === 'tentative' && !!record.predicted_position;
 }
+
+export interface ResourceUsage {
+  status: 'sampling' | 'ready' | 'unavailable';
+  instance_id: string | null;
+  cpu_total_percent: number;
+  logical_processors: number;
+  system_cpu_percent: number | null;
+  instance_cpu_percent: number | null;
+  available_cpu_percent: number | null;
+  sampled_at: number | null;
+}

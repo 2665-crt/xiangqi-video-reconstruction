@@ -8,6 +8,7 @@ import { ReviewPanel } from './components/ReviewPanel';
 import { RecordingPanel } from './components/RecordingPanel';
 import { RecoveryPanel } from './components/RecoveryPanel';
 import { RecheckPanel } from './components/RecheckPanel';
+import { ResourceMonitor } from './components/ResourceMonitor';
 import { AnimatedDisclosure, MotionRegion } from './components/MotionRegion';
 import { displayStep, isIgnored, lastKnownStep, nextStep, previousStep, positionAt, positionBefore, stepAtVideoTime, stepSeekTime, visibleRecords, replayRecords, reviewIntervals, recheckRange } from './replay';
 import type { Calibration, Color, Piece, PieceKind, Position, Square, Task, TaskSummary } from './types';
@@ -271,7 +272,7 @@ export default function App() {
     <header className="topbar">
       <div className="brand"><span className="brand-mark">棋</span><div><strong>棋局复刻</strong><small>XIANGQI REPLAY STUDIO</small></div></div>
       <div className="studio-project"><h1>象棋对局复盘</h1><span className={`save-state ${connected ? 'online' : ''}`} role="status"><CheckCircle2 size={15} />{busy ? '处理中' : settingsChanged || draft ? '未保存更改' : reviewIndex ? '校正待确认' : connected ? task ? '已保存' : '本地工作台' : '服务未连接'}</span></div>
-      <div className="header-actions"><label className="task-picker"><FolderOpen size={18} /><select aria-label="打开已保存任务" title={task?.filename ?? '打开已保存任务'} value={task?.id ?? ''} onChange={e => { const id = e.target.value; if (id) void perform(async () => { setTask(await api.get(id)); }); }} disabled={locked}><option value="">打开已保存任务</option>{tasks.map(t => <option key={t.id} value={t.id}>{t.filename} · {t.steps} 手</option>)}</select></label><div className="studio-export" ref={setExportTarget}>{!task && <button className="primary export-button" disabled><Clapperboard size={18} />导出对局录像</button>}</div></div>
+      <div className="header-actions"><label className="task-picker"><FolderOpen size={18} /><select aria-label="打开已保存任务" title={task?.filename ?? '打开已保存任务'} value={task?.id ?? ''} onChange={e => { const id = e.target.value; if (id) void perform(async () => { setTask(await api.get(id)); }); }} disabled={locked}><option value="">打开已保存任务</option>{tasks.map(t => <option key={t.id} value={t.id}>{t.filename} · {t.steps} 手</option>)}</select></label><div className="studio-export" ref={setExportTarget}>{!task && <button className="primary export-button" disabled><Clapperboard size={18} />导出对局录像</button>}</div><ResourceMonitor /></div>
     </header>
     <main>
       <nav className="studio-workflow" aria-label="复盘流程">{['准备视频', '识别', '核对', '导出'].map((label, index) => {
@@ -336,6 +337,7 @@ export default function App() {
         </section>
       </div>
       <MotionRegion show={!!task}>{task && <div className="studio-progress-grid"><section className="analysis-status studio-progress" aria-label="分析进度"><div role="status"><span className={task.status === 'analyzing' ? 'pulse-dot' : 'small-dot'} /><strong key={task.stage} className="stage-label">{task.stage}</strong></div>
+              <MotionRegion show={!task.initial_position}><p role="status">起始局面尚未建立，无法生成走棋步骤。{locked ? '请先停止分析，再核对初始棋局；已有扫描结果保留。' : '请核对标记的位置并保存初始棋局，再开始解析。'}</p><button className="secondary" disabled={!!locked} onClick={editInitial}>核对初始棋局</button></MotionRegion>
               <div><strong>视频扫描</strong><span>{Math.round(scanProgress)}%</span></div><div className="progress-track" role="progressbar" aria-label="视频扫描进度" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(scanProgress)}><i style={{ transform: `scaleX(${scanProgress / 100})` }} /></div><small>已扫描至 {timeText(scanTime)} / {timeText(task.end_s)} · 保存 {task.scan_events ?? 0} 个疑似变化事件</small>
               <div><strong>局面处理</strong><span>{Math.round(progress)}%</span></div><div className="progress-track" role="progressbar" aria-label="局面处理进度" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(progress)}><i style={{ transform: `scaleX(${progress / 100})` }} /></div><small>已处理至 {timeText(task.recognition_video_s || task.processed_video_s)} · 最近确认落点 {timeText(confirmedTime)} · {intervals.length} 段待核对区间 · 待处理 {Math.max(task.pending_event_count ?? 0, task.recovery?.pending_request ? 1 : 0)} 个</small>
               <MotionRegion show={task.tracking_state === 'recovering'}><p role="status">从 {timeText(task.tracking_since_s ?? confirmedTime)} 起{task.status === 'analyzing' || task.status === 'waiting_service' ? '正在重新同步' : '的画面仍需核对'}：{task.tracking_message ?? '等待连续清晰画面'}。已有棋谱保留，未确定区间继续保留供核对。</p></MotionRegion>

@@ -5,6 +5,7 @@ from .board_colors import skin_surface_mask, wood_surface_mask
 from .initial_observation import board_geometry
 from .numerical import circle_support
 from .piece_classifier import piece_color
+from .tracking_batch import grid_surface, surface_tables, binary_surfaces, native_surfaces
 
 
 class BoardObservation:
@@ -17,6 +18,18 @@ class BoardObservation:
         self.initial = None
         self._inverse_source = None
         self._inverse_matrix = None
+        self._grid_source = None
+        self._grid_origin = None
+        self._grid_projected = None
+
+    def grid_projection(self):
+        if (self._grid_origin != self.origin or self._grid_source is None
+                or not np.array_equal(self._grid_source, self.matrix)):
+            self._grid_projected = self.project([[self.origin + f * 50, self.origin + r * 50]
+                                                 for f in range(9) for r in range(10)])
+            self._grid_projected.setflags(write=False)
+            self._grid_source, self._grid_origin = self.matrix.copy(), self.origin
+        return self._grid_projected
 
     def project(self, points, inverse=False):
         matrix = self.matrix
@@ -143,6 +156,11 @@ class BoardObservation:
             face = cv2.getRectSubPix(self.small, (round(radius * 1.4), round(radius * 1.4)), (float(x), float(y)))
             self.centers[square] = center, float(radius)
             cells[square] = piece_color(face)
+        projected = self.grid_projection()
+        native_colors = native_surfaces(skin_surface_mask, wood_surface_mask)
+        skin_table, wood_table = surface_tables() if native_colors else (None, None)
+        native_colors = native_colors and binary_surfaces((skin_table, wood_table))
+        patches, squares = [], []
         for file in range(9):
             for rank in range(10):
                 square = file, rank
@@ -150,15 +168,27 @@ class BoardObservation:
                     continue
                 if self.fitted and cells.get(square) is not None:
                     cells.pop(square, None)
-                x, y = self.project([[self.origin + file * 50, self.origin + rank * 50]])[0]
+                x, y = projected[file * 10 + rank]
                 if not (8 <= x < self.small.shape[1] - 8 and 8 <= y < self.small.shape[0] - 8):
                     cells.pop(square, None)
                     continue
+                if native_colors and skin_table is None and wood_table is None:
+                    continue
                 patch = cv2.getRectSubPix(self.hsv, (15, 15), (float(x), float(y)))
+                if native_colors:
+                    patches.append(patch)
+                    squares.append(square)
+                    continue
                 skin, wood = skin_surface_mask(patch), wood_surface_mask(patch)
                 if skin is not None and skin.mean() > .08:
                     cells.pop(square, None)
                 elif wood is not None and wood.mean() > .8:
+                    cells[square] = None
+        if patches:
+            for square, flag in zip(squares, grid_surface(np.stack(patches), skin_table, wood_table)):
+                if flag == 1:
+                    cells.pop(square, None)
+                elif flag == 2:
                     cells[square] = None
         self.cells = cells
         return cells

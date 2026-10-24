@@ -988,6 +988,7 @@ def analyze_actual(task, store, vision):
                 if known is None or len(cells) != 90 or any(known.get(s) != c for s, c in cells.items()):
                     task.calibration = refine_calibration(preview[1], task.calibration)
         if task.initial_position is None:
+            VideoScan(task, store).update(task)
             initializer = vision or local_piece_classifier()
             task.stage = '向前寻找操作前的清晰局面'
             task = store.save_analysis(task)
@@ -1004,13 +1005,10 @@ def analyze_actual(task, store, vision):
             save_image(folder / name, image)
             task.initial_evidence_ids, task.initial_frame_s = [name], initial_time
             if initializer is None:
-                task = scan_video(task, store)
                 task.status, task.stage = 'needs_review', '本地模式缺少起始棋子身份，请识别或设置初始局面'
                 store.save_analysis(task)
                 return
             task.stage = '自动识别所选区间的起始局面'
-            if not getattr(initializer, 'local_classifier', None) and vision is not None:
-                task = scan_video(task, store)
             task.analysis_stats.model_requests += 1
             task.analysis_stats.images_sent += len(images)
             task.run_stats.model_requests += 1
@@ -1037,11 +1035,9 @@ def analyze_actual(task, store, vision):
             task.initial_piece_reviews = [InitialPieceReview.model_validate(r) for r in diagnostic.get('piece_reviews', [])]
             if len(unique) != 1:
                 task.error = (getattr(initializer, 'last_response', None) or {}).get('error')
-                task = store.save_analysis(task)
-                task = scan_video(task, store)
-                task.status, task.stage = 'needs_review', '已保存扫描结果和可识别部分，请核对未知位置后继续局面确认'
+                task.status, task.stage = 'needs_review', '起始局面未建立，请核对初始棋局后继续解析'
                 if task.initial_draft is not None:
-                    task.stage = '已复刻可识别部分，扫描结果已保存，未知位置待核对'
+                    task.stage = '起始棋局存在疑点，候选已显示；请核对并保存后继续解析'
                 task.usage = previous_usage + initializer.usage
                 task.run_stats.elapsed_seconds = monotonic() - started
                 store.save_analysis(task)

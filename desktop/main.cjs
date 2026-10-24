@@ -4,21 +4,19 @@ const { randomUUID } = require('node:crypto');
 const fs = require('node:fs');
 const http = require('node:http');
 const path = require('node:path');
+const { claimInstance } = require('./instances.cjs');
 
 const productName = 'XiangQi Vedio Reconstruction';
 const renderIndex = process.argv.indexOf('--recording-render');
 const portableRoot = app.isPackaged ? path.dirname(process.execPath) : path.resolve(__dirname, '..');
-const dataRoot = process.env.XIANGQI_DATA_ROOT || path.join(portableRoot, 'data');
-const recordingRoot = process.env.XIANGQI_RECORDING_ROOT || path.join(portableRoot, '录屏存放');
+const baseDataRoot = process.env.XIANGQI_DATA_ROOT || path.join(portableRoot, 'data');
+const baseRecordingRoot = process.env.XIANGQI_RECORDING_ROOT || path.join(portableRoot, '录屏存放');
 app.setName(productName);
 app.setAppUserModelId('com.2665crt.xiangqi-reconstruction');
-const profileRoot = renderIndex >= 0
-  ? path.join(path.dirname(process.argv[renderIndex + 1]), 'renderer-profile')
-  : path.join(dataRoot, 'desktop');
-fs.mkdirSync(profileRoot, { recursive: true });
-app.setPath('userData', profileRoot);
-
 if (renderIndex >= 0) {
+  const profileRoot = path.join(path.dirname(process.argv[renderIndex + 1]), 'renderer-profile');
+  fs.mkdirSync(profileRoot, { recursive: true });
+  app.setPath('userData', profileRoot);
   app.disableHardwareAcceleration();
   app.commandLine.appendSwitch('force-device-scale-factor', '1');
   app.whenReady().then(() => require('./recording.cjs').renderRecording(
@@ -27,9 +25,29 @@ if (renderIndex >= 0) {
     process.stderr.write(String(error.stack || error) + '\n');
     app.exit(1);
   });
-} else if (!app.requestSingleInstanceLock()) {
-  app.quit();
 } else {
+  startDesktop().catch(error => {
+    dialog.showErrorBox(productName, '启动未完成：' + error.message);
+    app.quit();
+  });
+}
+
+async function startDesktop() {
+  const resources = app.isPackaged ? process.resourcesPath : process.env.XIANGQI_DESKTOP_RESOURCES;
+  const backendExe = path.join(resources, 'backend', 'XiangQiBackend.exe');
+  const instance = await claimInstance(baseDataRoot, baseRecordingRoot, candidate => {
+    if (!fs.existsSync(path.join(candidate, 'runtime', 'backend.lock'))) return false;
+    const probe = spawnSync(backendExe, ['--probe-data-root', candidate], { windowsHide: true, stdio: 'ignore' });
+    if (probe.error) throw probe.error;
+    if (probe.status === 73) return true;
+    if (probe.status !== 0) throw new Error('无法检查实例数据目录的占用状态');
+    return false;
+  });
+  const { dataRoot, recordingRoot } = instance;
+  const windowTitle = `${productName} · 窗口 ${instance.id}`;
+  const profileRoot = path.join(dataRoot, 'desktop');
+  fs.mkdirSync(profileRoot, { recursive: true });
+  app.setPath('userData', profileRoot);
   let window;
   let backend;
   let origin;
@@ -79,7 +97,7 @@ if (renderIndex >= 0) {
       const destination = new URL(url);
       if (origin && destination.origin === origin && /^\/api\/(recordings\/[^/]+\/video|tasks\/[^/]+\/evidence\/[^/]+)$/.test(destination.pathname)) {
         return { action: 'allow', overrideBrowserWindowOptions: {
-          title: productName, width: 1080, height: 900, autoHideMenuBar: true,
+          title: windowTitle, width: 1080, height: 900, autoHideMenuBar: true,
           webPreferences: { nodeIntegration: false, contextIsolation: true, sandbox: true },
         } };
       }
@@ -88,19 +106,16 @@ if (renderIndex >= 0) {
     target.webContents.on('will-navigate', (event, url) => {
       if (!origin || new URL(url).origin !== origin) event.preventDefault();
     });
-    target.webContents.on('page-title-updated', event => { event.preventDefault(); target.setTitle(productName); });
+    target.webContents.on('page-title-updated', event => { event.preventDefault(); target.setTitle(windowTitle); });
     target.webContents.on('did-create-window', child => secureWindow(child));
   }
 
-  app.on('second-instance', () => {
-    if (window) { if (window.isMinimized()) window.restore(); window.focus(); }
-  });
   app.on('window-all-closed', () => app.quit());
   app.on('before-quit', event => {
     if (!quitting) {
       event.preventDefault();
       quitting = true;
-      stopBackend().finally(() => app.quit());
+      stopBackend().finally(() => instance.release()).finally(() => app.quit());
     }
   });
 
@@ -110,17 +125,17 @@ if (renderIndex >= 0) {
     Menu.setApplicationMenu(null);
     session.defaultSession.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
     window = new BrowserWindow({
-      title: productName, width: 1500, height: 1000, minWidth: 1000, minHeight: 720,
+      title: windowTitle, width: 1500, height: 1000, minWidth: 1000, minHeight: 720,
       backgroundColor: '#f4f5ee', autoHideMenuBar: true,
       webPreferences: { nodeIntegration: false, contextIsolation: true, sandbox: true },
     });
     secureWindow(window);
     window.on('closed', () => app.quit());
     await window.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(`<!doctype html><html lang="zh-CN"><meta charset="utf-8"><style>body{margin:0;background:#f4f5ee;color:#28594c;font-family:Segoe UI,Microsoft YaHei,sans-serif;display:grid;place-items:center;height:100vh}.card{text-align:center;animation:fade .3s ease}h1{font-size:25px;font-weight:500}p{font-size:14px;color:#748575}.mark{width:52px;height:52px;display:grid;place-items:center;border:2px solid #789d83;border-radius:12px;margin:auto;font-size:30px}.line{width:160px;height:3px;background:#dce4d6;overflow:hidden;margin:26px auto}.line:after{content:'';display:block;width:55px;height:100%;background:#789d83;animation:slide 1.4s ease-in-out infinite}@keyframes slide{from{transform:translateX(-55px)}to{transform:translateX(160px)}}@keyframes fade{from{opacity:0}to{opacity:1}}@media(prefers-reduced-motion:reduce){*{animation:none!important}}</style><div class="card"><div class="mark">棋</div><h1>${productName}</h1><p>正在启动本地模型，请稍候…</p><div class="line"></div><p>所有识别在本机完成</p></div></html>`));
-    const resources = app.isPackaged ? process.resourcesPath : process.env.XIANGQI_DESKTOP_RESOURCES;
-    const backendExe = path.join(resources, 'backend', 'XiangQiBackend.exe');
     const environment = { ...process.env,
       XIANGQI_DESKTOP_TOKEN: token, XIANGQI_DESKTOP_EXE: process.execPath,
+      XIANGQI_DESKTOP_PID: String(process.pid), XIANGQI_INSTANCE_ID: String(instance.id),
+      XIANGQI_DATA_ROOT: dataRoot, XIANGQI_RECORDING_ROOT: recordingRoot,
       YOLO_OFFLINE: 'true', YOLO_AUTOINSTALL: 'false',
       PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8', PYTHONNOUSERSITE: '1',
     };
@@ -137,6 +152,12 @@ if (renderIndex >= 0) {
     while (Date.now() < deadline) {
       if (quitting) return;
       if (spawnError) throw spawnError;
+      if (backend.exitCode === 73) {
+        log('Data directory was claimed during startup; selecting another instance.');
+        app.relaunch();
+        app.quit();
+        return;
+      }
       if (backend.exitCode !== null) throw new Error('后台服务已退出，请查看 data/logs/backend.log。');
       if (fs.existsSync(readyFile)) {
         try {
@@ -151,7 +172,7 @@ if (renderIndex >= 0) {
     if (!origin || Date.now() >= deadline) throw new Error('启动超时：' + detail);
     log('Backend ready at ' + origin);
     await window.loadURL(origin);
-    window.setTitle(productName);
+    window.setTitle(windowTitle);
     backend.on('exit', code => {
       if (!quitting) { dialog.showErrorBox(productName, '后台服务已退出（' + code + '）。请查看 data/logs/backend.log 后重新打开应用。'); app.quit(); }
     });
