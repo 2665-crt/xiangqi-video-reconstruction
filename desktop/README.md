@@ -2,9 +2,13 @@
 
 应用名：**XiangQi Vedio Reconstruction**。
 
-将整个 ZIP 解压到可写目录，双击同名 EXE。保留 EXE 旁边的全部文件，不能单独复制 EXE。无需安装 Python、Node.js 或浏览器，无需配置云端 API；使用随包提供的本地模型和 CPU 推理。
+推荐下载 `XiangQi-Vedio-Reconstruction-0.3.1-win-x64-portable.exe`，单个文件即可放到可写目录或桌面双击运行。启动时显示准备画面并自动展开内置运行环境，无需手动解压。无需安装 Python、Node.js 或浏览器，无需配置云端 API；使用内置本地模型和 CPU 推理。
+
+旧版 ZIP 或源码构建生成的完整程序目录仍须保留全部文件，桌面应创建指向内部 EXE 的快捷方式。内部 EXE 不能脱离 `icudtl.dat`、`resources` 等同级依赖单独使用。
 
 首次启动会加载模型。上传 MP4 后，按现有界面完成棋盘定位、初始局面核对、分析和人工校正。模型可能留下待核对区间，不能保证每段视频完全自动还原。任务保存在应用目录的 `data`，导出视频保存在 `录屏存放`。移动软件时请移动整个文件夹，保留这两个目录即可保留个人数据。关闭应用会停止自己的后台服务。
+
+单文件模式的“应用目录”指下载 EXE 所在目录，不是临时解压目录。每次启动分别使用独立临时运行环境；关闭后临时文件可清理，任务和录屏继续保留在 EXE 相邻目录。显式配置 `XIANGQI_DATA_ROOT`、`XIANGQI_RECORDING_ROOT` 时优先使用配置路径。
 
 此构建未作代码签名。在 Windows x64 本机完成验收，未在其他实体电脑上验证。第三方组件、权重来源和许可见 `licenses`；对应应用源码随 `licenses/application-source.zip` 提供。
 
@@ -30,6 +34,8 @@ CPU 数值为采样估计：完全在两次采样之间启动并退出的短进�
 powershell -ExecutionPolicy Bypass -File .\desktop\build.ps1 -OutputRoot 'D:\XiangQi-build'
 ```
 
-`OutputRoot` 应选择不存在成品文件夹的目录；脚本不会替换已有成品。临时依赖位于该目录的 `build`。确认成品后可以删除 `build`，不要删除应用文件夹内的 `resources`。
+`OutputRoot` 应选择不存在成品文件夹的目录；脚本不会替换已有成品。输出包括完整程序目录和 portable 单文件 EXE，工具依赖位于 `build`。完整目录中的 `resources` 不能删除；单文件 EXE 可独立分发。
+
+单文件构建固定使用 MIT 许可的 electron-builder 26.18.0 portable 目标。该版本实际实现中 `unpackDirName: true` 使用每次启动独立的 `$PLUGINSDIR`；网站部分文档描述与该版本不一致，请保留仓库配置并执行双开关闭隔离验收。
 
 实现基于 [Electron](https://www.electronjs.org/docs/latest/tutorial/tutorial-packaging) 与 [PyInstaller](https://pyinstaller.org/en/stable/operating-mode.html)。Electron 内置窗口显示现有 React 页面，后端使用随机本机端口，录像使用独立的离屏渲染窗口和原有编码流程。

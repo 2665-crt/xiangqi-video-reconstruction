@@ -22,7 +22,7 @@ Run-Checked $python @('-m', 'pip', 'install', 'torch==2.7.1+cpu', 'torchvision==
 Run-Checked $python @('-m', 'pip', 'install', '-r', (Join-Path $sourceRoot 'backend/requirements-fusion.txt'), '-c', (Join-Path $sourceRoot 'backend/constraints-fusion.txt'), 'pyinstaller==6.22.3')
 $tools = Join-Path $buildRoot 'tools'
 New-Item -ItemType Directory -Force -Path $tools | Out-Null
-'{"name":"xiangqi-desktop-build-tools","private":true,"devDependencies":{"electron":"44.9.0","@electron/packager":"20.3.0"}}' | Set-Content -LiteralPath (Join-Path $tools 'package.json') -Encoding UTF8
+'{"name":"xiangqi-desktop-build-tools","private":true,"devDependencies":{"electron":"44.9.0","@electron/packager":"20.3.0","electron-builder":"26.18.0"}}' | Set-Content -LiteralPath (Join-Path $tools 'package.json') -Encoding UTF8
 Push-Location $tools
 try {
     Run-Checked 'npm.cmd' @('install', '--no-audit', '--no-fund')
@@ -36,4 +36,5 @@ try { Run-Checked 'npm.cmd' @('ci', '--no-audit', '--no-fund'); Run-Checked 'npm
 Run-Checked $python @('-m', 'PyInstaller', '--noconfirm', '--distpath', $buildRoot, '--workpath', (Join-Path $buildRoot 'pyinstaller'), (Join-Path $PSScriptRoot 'backend.spec'))
 Run-Checked 'node' @((Join-Path $PSScriptRoot 'package-app.mjs'), $buildRoot, $OutputRoot)
 Run-Checked $python @((Join-Path $PSScriptRoot 'notices.py'), (Join-Path $OutputRoot 'XiangQi Vedio Reconstruction'), $sourceRoot, $buildRoot)
+Run-Checked 'node' @((Join-Path $PSScriptRoot 'package-portable.mjs'), $tools, (Join-Path $OutputRoot 'XiangQi Vedio Reconstruction'), $OutputRoot)
 Write-Host "Portable application ready: $OutputRoot\XiangQi Vedio Reconstruction"

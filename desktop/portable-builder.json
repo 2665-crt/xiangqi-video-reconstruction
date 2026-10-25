@@ -1,0 +1,15 @@
+{
+  "appId": "com.2665crt.xiangqi-reconstruction",
+  "productName": "XiangQi Vedio Reconstruction",
+  "electronVersion": "44.9.0",
+  "npmRebuild": false,
+  "compression": "normal",
+  "publish": null,
+  "win": { "target": ["portable"], "signAndEditExecutable": false },
+  "portable": {
+    "artifactName": "XiangQi-Vedio-Reconstruction-${version}-win-x64-portable.exe",
+    "unpackDirName": true,
+    "useZip": true,
+    "requestExecutionLevel": "user"
+  }
+}

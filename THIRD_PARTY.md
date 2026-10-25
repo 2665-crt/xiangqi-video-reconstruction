@@ -14,3 +14,5 @@
 React、Vite、FastAPI、OpenCV、PyAV、ONNX Runtime、PyTorch 等运行依赖通过包管理器安装，各自版权和许可证保留在依赖包中。整个项目尚未指定统一开源许可证，不据此声称已满足所有第三方分发条件。
 
 本项目训练生成的 CNN 与颜色参数随仓库提供；原始训练图片、个人视频、私人任务和真实视频回归素材不在发布范围内。山水背景为本项目创作流程生成的界面资源。
+
+Windows 单文件便携启动外层使用 [electron-builder](https://github.com/electron-userland/electron-builder) 26.18.0 的 portable 目标生成，工具采用 [MIT 许可证](https://github.com/electron-userland/electron-builder/blob/master/LICENSE)。其使用的 [NSIS](https://nsis.sourceforge.io/) 及组件保留各自[许可说明](https://nsis.sourceforge.io/License)。应用包内 `licenses/build-tools` 提供构建工具许可副本，应用源码包含相应构建配置。

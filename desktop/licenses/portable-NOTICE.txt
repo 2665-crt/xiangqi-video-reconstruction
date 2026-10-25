@@ -1,0 +1,21 @@
+Single-file Windows portable launcher
+
+electron-builder 26.18.0
+Copyright (c) 2015 Loopline Systems and contributors
+License: MIT. The distribution includes electron-builder-LICENSE.txt.
+Source: https://github.com/electron-userland/electron-builder
+
+NSIS 3.0.4.1
+Copyright (C) 1999-2018 Contributors
+The distribution includes NSIS-COPYING.txt from the exact compiler bundle.
+Source and licenses: https://nsis.sourceforge.io/
+
+StdUtils plug-in (unmodified binary distributed by electron-builder nsis-resources 3.4.1)
+Copyright (C) 2004-2018 LoRd_MuldeR
+License: GNU Lesser General Public License 2.1 or later.
+The distribution includes StdUtils-LGPL-2.1.txt and the upstream StdUtils.nsh header.
+Source: https://github.com/lordmulder/stdutils/
+License clarification for use through the NSIS plug-in interface:
+https://nsis.sourceforge.io/StdUtils_plug-in
+
+This application does not modify the NSIS or StdUtils binaries.

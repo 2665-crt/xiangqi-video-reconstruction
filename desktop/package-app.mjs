@@ -7,7 +7,7 @@ if (!buildRoot || !outputRoot) throw new Error('Usage: node package-app.mjs BUIL
 const source = path.dirname(fileURLToPath(import.meta.url));
 const { packager } = await import(pathToFileURL(path.join(buildRoot, 'tools/node_modules/@electron/packager/dist/index.js')));
 const options = {
-  dir: source, name: 'XiangQi Vedio Reconstruction', appVersion: '0.2.0',
+  dir: source, name: 'XiangQi Vedio Reconstruction', appVersion: JSON.parse(fs.readFileSync(path.join(source, 'package.json'), 'utf8')).version,
   electronVersion: '44.9.0', platform: 'win32', arch: 'x64', asar: true,
   out: path.join(buildRoot, 'packaged'), overwrite: true,
   tmpdir: path.join(buildRoot, 'packager-tmp'),

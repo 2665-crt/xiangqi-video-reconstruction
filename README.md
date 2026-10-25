@@ -6,15 +6,15 @@
 
 ## 下载免安装版
 
-打开 [最新 Release](https://github.com/2665-crt/xiangqi-video-reconstruction/releases/latest)，在 **Assets** 中下载 `XiangQi-Vedio-Reconstruction-0.3.0-win-x64.zip`。
+打开 [最新 Release](https://github.com/2665-crt/xiangqi-video-reconstruction/releases/latest)，在 **Assets** 中下载 `XiangQi-Vedio-Reconstruction-0.3.1-win-x64-portable.exe`。
 
-1. 将整个 ZIP 解压到可写目录。
-2. 双击 `XiangQi Vedio Reconstruction.exe`，等待本地模型加载。
+1. 将下载的单文件 EXE 放到可写目录，可直接放在桌面。
+2. 双击 EXE，等待内置运行环境展开和本地模型加载。
 3. 上传 MP4，按界面完成棋盘定位、初始局面核对和分析；可人工校正并导出棋盘录像。
 
-再次双击 EXE 可打开独立窗口，分别处理和保存任务；当前已实测双窗口。右上角每秒显示整机与本窗口 CPU 占用。起始局面有疑点时立即显示核对入口，保存初始棋局后继续解析。版本变化及验收范围见 [v0.3.0 发布说明](docs/releases/v0.3.0.md)。
+再次双击同一个单文件 EXE 可打开独立窗口，分别处理和保存任务。右上角每秒显示整机与本窗口 CPU 占用。起始局面有疑点时立即显示核对入口，保存初始棋局后继续解析。分发变化见 [v0.3.1 发布说明](docs/releases/v0.3.1.md)，双开与识别验收见 [v0.3.0 发布说明](docs/releases/v0.3.0.md)。
 
-保留 EXE 旁的全部文件，不要只复制 EXE。便携版无需安装 Python、Node.js 或 Chrome。任务保存在应用目录的 `data`，导出录像在 `录屏存放`；移动应用时请保留这两个目录。GitHub 自动生成的 **Source code** ZIP 是源码包，直接使用请选择上面的便携包。
+单文件 portable EXE 已包含程序依赖，无需安装 Python、Node.js 或 Chrome。任务保存在下载 EXE 相邻的 `data`，导出录像在 `录屏存放`；移动软件时请一并保留这两个目录。旧版 ZIP 仍必须完整解压，桌面使用快捷方式，不要只取其中的内部 EXE。GitHub 自动生成的 **Source code** ZIP 是源码包，直接使用请选择上面的 portable EXE。
 
 当前便携版在本机 Windows x64 完成识别、录像导出与解压启动验收；未签名，尚未在其他实体电脑验证。未确定的识别结果仍需核对，不保证任意视频都能无误自动还原。第三方模型与组件说明见 [THIRD_PARTY.md](THIRD_PARTY.md)，桌面版构建方法见 [desktop/README.md](desktop/README.md)。
 

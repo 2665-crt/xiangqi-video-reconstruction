@@ -8,7 +8,7 @@ const { claimInstance } = require('./instances.cjs');
 
 const productName = 'XiangQi Vedio Reconstruction';
 const renderIndex = process.argv.indexOf('--recording-render');
-const portableRoot = app.isPackaged ? path.dirname(process.execPath) : path.resolve(__dirname, '..');
+const portableRoot = app.isPackaged ? process.env.PORTABLE_EXECUTABLE_DIR || path.dirname(process.execPath) : path.resolve(__dirname, '..');
 const baseDataRoot = process.env.XIANGQI_DATA_ROOT || path.join(portableRoot, 'data');
 const baseRecordingRoot = process.env.XIANGQI_RECORDING_ROOT || path.join(portableRoot, '录屏存放');
 app.setName(productName);
@@ -154,7 +154,7 @@ async function startDesktop() {
       if (spawnError) throw spawnError;
       if (backend.exitCode === 73) {
         log('Data directory was claimed during startup; selecting another instance.');
-        app.relaunch();
+        app.relaunch({ execPath: process.env.PORTABLE_EXECUTABLE_FILE || process.execPath });
         app.quit();
         return;
       }
