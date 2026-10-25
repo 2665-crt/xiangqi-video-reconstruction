@@ -59,12 +59,14 @@ class FusionPieceClassifier:
                 cnn = self.cnn.classify(gray, color)
                 deep = detected.get(square, {})
                 deep_probabilities = deep.get('class_probabilities', {})
+                deep_winner = max(deep_probabilities, key=deep_probabilities.get) if deep_probabilities else None
                 probabilities = fuse_probabilities(cnn.get('class_probabilities', {}), deep_probabilities,
                                                    cnn['score'], deep.get('confidence', 0.))
                 row = {'file': square[0], 'rank': square[1], 'frame': frame_index,
                        'class_probabilities': probabilities, 'cnn_probabilities': cnn.get('class_probabilities', {}),
                        'deep_probabilities': deep_probabilities, 'cnn_score': cnn['score'],
-                       'deep_confidence': deep.get('confidence', 0.)}
+                       'deep_confidence': deep.get('confidence', 0.), 'ink_color': color,
+                       'color_conflict': deep_winner is not None and not deep_winner.startswith(color + '_')}
                 by_square.setdefault(square, []).append(row)
         cells, ambiguous = merge_initial_observations([o[0] for o in observations])
         pieces, reviews = [], []
@@ -74,7 +76,9 @@ class FusionPieceClassifier:
             rows = by_square.get(square, [])
             usable = [r['class_probabilities'] for r in rows if r['class_probabilities']]
             probabilities = {label: float(np.mean([p[label] for p in usable])) for label in usable[0]} if usable else {}
-            winner = max(probabilities, key=probabilities.get) if probabilities else None
+            color = rows[-1]['ink_color'] if rows else color
+            compatible = {label: value for label, value in probabilities.items() if label.startswith(color + '_') and value > 0}
+            winner = max(compatible, key=compatible.get) if compatible else None
             selected_color, kind = winner.split('_', 1) if winner else (color, None)
             score = probabilities[winner] if winner else 0.
             if winner:
@@ -84,16 +88,20 @@ class FusionPieceClassifier:
                 'color': selected_color, 'prediction': kind, 'score': score,
                 'class_probabilities': probabilities, 'frames': rows})
             disagreement = len({max(p, key=p.get) for p in usable}) > 1
-            if kind is None or score < .9 or disagreement:
+            color_conflict = any(r['color_conflict'] for r in rows)
+            if kind is None or score < .9 or disagreement or color_conflict:
                 reviews.append({'square': {'file': square[0], 'rank': square[1]}, 'color': selected_color,
                                 'prediction': kind, 'score': score,
-                                'reason': '棋面无法辨认' if kind is None else '已显示最大概率棋种，相邻画面仍需核对' if disagreement else '已显示最大概率棋种'})
+                                'reason': '棋面颜色与模型颜色冲突，已保留棋面颜色，请核对' if color_conflict else '棋面无法辨认' if kind is None else '已显示最大概率棋种，相邻画面仍需核对' if disagreement else '已显示最大概率棋种'})
         reviews.extend({'square': {'file': f, 'rank': r}, 'color': None, 'prediction': None, 'score': 0.,
                         'reason': '占位不确定', 'state': 'occupancy'}
                        for r in range(10) for f in range(9) if (f, r) not in cells)
         position = Position(pieces=pieces, side_to_move=reference.side_to_move if reference is not None else 'red')
         self.last_response['draft_position'] = position.model_dump()
         self.last_response['piece_reviews'] = reviews
+        if any(r['color_conflict'] for rows in by_square.values() for r in rows):
+            self.last_response['error'] = '棋面颜色与模型颜色存在冲突，请核对并保存初始棋局'
+            return []
         if changed or ambiguous or len(cells) != 90:
             self.last_response['error'] = '已显示最大概率棋种，起始画面存在局面变化或占位不确定，请核对'
             return []

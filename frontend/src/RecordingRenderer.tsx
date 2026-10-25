@@ -1,9 +1,9 @@
 import { useLayoutEffect, useState } from 'react';
 import { flushSync } from 'react-dom';
 import { Board } from './components/Board';
-import type { MoveRecord, Position } from './types';
+import type { Calibration, MoveRecord, Position } from './types';
 
-interface RecordingPayload { initial_position: Position; records: MoveRecord[]; interval_s: number }
+interface RecordingPayload { initial_position: Position; records: MoveRecord[]; interval_s: number; orientation?: Calibration['orientation'] }
 declare global {
   interface Window {
     loadRecording: (payload: RecordingPayload) => Promise<void>;
@@ -33,5 +33,5 @@ export function RecordingRenderer() {
     };
   }, []);
   const record = payload?.records[step - 1];
-  return <div className="recording-render"><Board position={step === 0 ? payload?.initial_position ?? null : record?.position_after ?? null} step={step} lastMove={record?.move} /></div>;
+  return <div className="recording-render"><Board position={step === 0 ? payload?.initial_position ?? null : record?.position_after ?? null} orientation={payload?.orientation} step={step} lastMove={record?.move} /></div>;
 }

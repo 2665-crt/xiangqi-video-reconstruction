@@ -29,6 +29,28 @@ def test_strong_detector_can_help_an_ambiguous_cnn():
     assert sum(probabilities.values()) == pytest.approx(1)
 
 
+@pytest.mark.parametrize('color,rank', [('black', 7), ('red', 2)])
+def test_detector_cannot_swap_visible_ink_color(classifier, monkeypatch, color, rank):
+    from app.schemas import Piece, Position, Square
+    from test_tracking import board_image
+    original = Position(pieces=[Piece(id='piece', color=color, kind='rook', square=Square(file=4, rank=rank))],
+                        side_to_move=color)
+    opposite = 'red' if color == 'black' else 'black'
+    monkeypatch.setattr(classifier, 'classify', lambda *args: {
+        'prediction': 'rook', 'kind': None, 'score': .55, 'margin': .1,
+        'class_probabilities': {f'{color}_rook': .55, f'{color}_cannon': .45}})
+    class Detector:
+        def readings(self, image):
+            return {(4, rank): {'class_probabilities': {f'{opposite}_rook': .99}, 'confidence': .99}}
+    fusion = FusionPieceClassifier(classifier, Detector())
+    result = fusion.recognize_position([board_image(original)], actual=True)
+    assert result == []
+    draft = fusion.last_response['draft_position']['pieces'][0]
+    assert draft['color'] == color
+    assert draft['kind'] == 'rook'
+    assert any('颜色' in r['reason'] for r in fusion.last_response['piece_reviews'])
+
+
 def test_detector_does_not_always_overwrite_a_more_resolved_cnn():
     probabilities = fuse_probabilities({'red_cannon':.64,'red_elephant':.36},
                                       {'red_elephant':.90,'red_cannon':.10},.64,.87)
@@ -143,9 +165,11 @@ def test_colour_conflict_keeps_the_real_detector_distribution(classifier,monkeyp
             return {(4,3):{'confidence':.91,'class_probabilities':{
                 'black_elephant':.99999,'red_rook':.000009,'red_horse':.000001}}}
     fusion=FusionPieceClassifier(classifier,Detector())
-    position=fusion.recognize_position([board_image(original)],actual=True)[0]
-    assert (position.pieces[0].color,position.pieces[0].kind)==('black','elephant')
+    assert fusion.recognize_position([board_image(original)],actual=True) == []
+    piece = fusion.last_response['draft_position']['pieces'][0]
+    assert (piece['color'],piece['kind'])==('red','horse')
     assert fusion.last_response['readings'][0]['class_probabilities']['black_elephant']>.79
+    assert '颜色' in fusion.last_response['piece_reviews'][0]['reason']
 
 def test_deep_readings_recovers_weak_detection_and_keeps_scale_disagreement_unknown():
     from app.deep_detector import DeepPieceDetector

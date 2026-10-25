@@ -52,6 +52,7 @@ def build_recording_playlist(task: Task, interval_s: int) -> dict:
         raise ValueError('暂无可导出的对局步骤')
     duration = (len(records) + 1) * interval_s
     return {'initial_position': task.initial_position.model_dump(by_alias=True), 'records': records,
+            'orientation': task.calibration.orientation if task.calibration else 'normal',
             'interval_s': interval_s, 'duration_s': duration, 'total_frames': duration * 60}
 
 

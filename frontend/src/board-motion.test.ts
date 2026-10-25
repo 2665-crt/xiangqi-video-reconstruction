@@ -12,6 +12,9 @@ const after: Position = { side_to_move: 'black', pieces: [
 ] };
 
 describe('虚拟棋盘动画', () => {
+  it('局面相同时切换方向仍替换棋盘并取消旧坐标动画', () => {
+    expect(planBoardTransition(before, before, 0, false, true).type).toBe('replace');
+  });
   it('单步吃子保留移动起终点和被吃棋子，供落子阶段移除', () => {
     const transition = planBoardTransition(before, after, 1);
     expect(transition.type).toBe('move');

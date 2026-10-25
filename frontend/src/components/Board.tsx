@@ -1,8 +1,8 @@
 import { useLayoutEffect, useRef, useState } from 'react';
-import type { InitialPieceReview, Move, Piece, Position, Square } from '../types';
+import type { Calibration, InitialPieceReview, Move, Piece, Position, Square } from '../types';
 import { pieceText } from '../types';
 
-export function planBoardTransition(before: Position | null, after: Position | null, stepDelta: number, replace = false) {
+export function planBoardTransition(before: Position | null, after: Position | null, stepDelta: number, replace = false, orientationChanged = false) {
   const old = new Map(before?.pieces.map(p => [p.id, p]) ?? []);
   const next = new Map(after?.pieces.map(p => [p.id, p]) ?? []);
   const removed = [...old.values()].filter(p => !next.has(p.id));
@@ -16,8 +16,8 @@ export function planBoardTransition(before: Position | null, after: Position | n
     if (previous.square.file !== p.square.file || previous.square.rank !== p.square.rank) moved.push({ before: previous, after: p });
   }
   let type: 'none' | 'move' | 'replace' = 'replace';
-  if (!moved.length && !removed.length && !added.length && !identityChanged) type = 'none';
-  else if (before && after && !replace && !identityChanged && Math.abs(stepDelta) <= 1 && moved.length === 1 && removed.length <= 1 && added.length <= 1) {
+  if (!moved.length && !removed.length && !added.length && !identityChanged && !orientationChanged) type = 'none';
+  else if (before && after && !replace && !orientationChanged && !identityChanged && Math.abs(stepDelta) <= 1 && moved.length === 1 && removed.length <= 1 && added.length <= 1) {
     const move = moved[0];
     const capturedAtTarget = removed.every(p => p.square.file === move.after.square.file && p.square.rank === move.after.square.rank);
     const restoredAtSource = added.every(p => p.square.file === move.before.square.file && p.square.rank === move.before.square.rank);
@@ -26,24 +26,30 @@ export function planBoardTransition(before: Position | null, after: Position | n
   return { type, moved, removed, added };
 }
 
-interface Props { position: Position | null; step?: number; replace?: boolean; lastMove?: Move | null; inferredMove?: Move | null; onSquare?: (square: Square) => void; selected?: Square | null; reviews?: InitialPieceReview[] }
-export function Board({ position, step = 0, replace = false, lastMove, inferredMove, onSquare, selected, reviews = [] }: Props) {
-  const previous = useRef<{ position: Position | null; step: number }>({ position: null, step });
+interface Props { position: Position | null; orientation?: Calibration['orientation']; step?: number; replace?: boolean; lastMove?: Move | null; inferredMove?: Move | null; onSquare?: (square: Square) => void; selected?: Square | null; reviews?: InitialPieceReview[] }
+export function Board({ position, orientation = 'normal', step = 0, replace = false, lastMove, inferredMove, onSquare, selected, reviews = [] }: Props) {
+  const previous = useRef<{ position: Position | null; step: number; orientation: Calibration['orientation'] }>({ position: null, step, orientation });
   const nodes = useRef(new Map<string, SVGGElement>());
   const piecesLayer = useRef<SVGGElement>(null);
   const ghostsLayer = useRef<SVGGElement>(null);
   const markersLayer = useRef<SVGGElement>(null);
   const animations = useRef<Animation[]>([]);
   const [marker, setMarker] = useState<{ from: Square; to: Square; color: string; pieceId: string } | null>(null);
-  const transition = planBoardTransition(previous.current.position, position, step - previous.current.step, replace);
+  const transition = planBoardTransition(previous.current.position, position, step - previous.current.step, replace, previous.current.orientation !== orientation);
   const activeId = transition.moved[0]?.after.id ?? marker?.pieceId;
-  const x = (file: number) => 50 + file * 47;
-  const y = (rank: number) => 50 + rank * 47;
+  const rotated = orientation === 'rotated_180' || orientation === 'mirrored_rotated_180';
+  const mirrored = orientation === 'mirrored' || orientation === 'mirrored_rotated_180';
+  const gridX = (file: number) => 50 + file * 47;
+  const gridY = (rank: number) => 50 + rank * 47;
+  const x = (file: number) => gridX(rotated !== mirrored ? 8 - file : file);
+  const y = (rank: number) => gridY(rotated ? 9 - rank : rank);
 
   useLayoutEffect(() => {
     const before = previous.current.position;
-    const plan = planBoardTransition(before, position, step - previous.current.step, replace);
-    previous.current = { position, step };
+    const oldOrientation = previous.current.orientation;
+    const orientationChanged = oldOrientation !== orientation;
+    const plan = planBoardTransition(before, position, step - previous.current.step, replace, orientationChanged);
+    previous.current = { position, step, orientation };
     if (plan.type === 'none') return;
     animations.current.forEach(animation => animation.cancel());
     animations.current = [];
@@ -58,7 +64,9 @@ export function Board({ position, step = 0, replace = false, lastMove, inferredM
         if (!node || !ghostsLayer.current) continue;
         const ghost = node.cloneNode(true) as SVGGElement;
         ghost.removeAttribute('data-piece-id');
-        ghost.setAttribute('transform', `translate(${x(piece.square.file)} ${y(piece.square.rank)})`);
+        const oldRotated = oldOrientation === 'rotated_180' || oldOrientation === 'mirrored_rotated_180';
+        const oldMirrored = oldOrientation === 'mirrored' || oldOrientation === 'mirrored_rotated_180';
+        ghost.setAttribute('transform', `translate(${gridX(oldRotated !== oldMirrored ? 8 - piece.square.file : piece.square.file)} ${gridY(oldRotated ? 9 - piece.square.rank : piece.square.rank)})`);
         ghostsLayer.current.appendChild(ghost);
         const animation = ghost.animate([{ opacity: 1 }, { opacity: 0 }], { duration: plan.type === 'move' ? 140 : 180, delay: plan.type === 'move' ? 370 : 0, fill: 'both' });
         animation.onfinish = () => ghost.remove();
@@ -91,12 +99,12 @@ export function Board({ position, step = 0, replace = false, lastMove, inferredM
       }
     }
     for (const id of nodes.current.keys()) if (!position?.pieces.some(p => p.id === id)) nodes.current.delete(id);
-  }, [position, step, replace, lastMove]);
+  }, [position, step, replace, lastMove, orientation]);
 
   useLayoutEffect(() => () => {
     animations.current.forEach(animation => animation.cancel());
     ghostsLayer.current?.replaceChildren();
-    previous.current = { position: null, step: 0 };
+    previous.current = { ...previous.current, position: null, step: 0 };
   }, []);
 
   const orderedPieces = [...position?.pieces ?? []].sort((a, b) => Number(a.id === activeId) - Number(b.id === activeId));
@@ -107,9 +115,9 @@ export function Board({ position, step = 0, replace = false, lastMove, inferredM
     </defs>
     <rect width="476" height="525" rx="7" fill="url(#wood)" />
     <rect x="38" y="38" width="400" height="447" fill="none" stroke="#886440" strokeWidth="2" />
-    {Array.from({ length: 10 }, (_, rank) => <line key={`h${rank}`} x1="50" x2="426" y1={y(rank)} y2={y(rank)} stroke="#967650" strokeWidth="1.2" />)}
-    {Array.from({ length: 9 }, (_, file) => <g key={`v${file}`} stroke="#967650" strokeWidth="1.2"><line x1={x(file)} x2={x(file)} y1="50" y2={file === 0 || file === 8 ? 473 : y(4)} />{file > 0 && file < 8 && <line x1={x(file)} x2={x(file)} y1={y(5)} y2="473" />}</g>)}
-    {[0, 7].map(rank => <g key={rank} stroke="#967650"><line x1={x(3)} y1={y(rank)} x2={x(5)} y2={y(rank + 2)} /><line x1={x(5)} y1={y(rank)} x2={x(3)} y2={y(rank + 2)} /></g>)}
+    {Array.from({ length: 10 }, (_, rank) => <line key={`h${rank}`} x1="50" x2="426" y1={gridY(rank)} y2={gridY(rank)} stroke="#967650" strokeWidth="1.2" />)}
+    {Array.from({ length: 9 }, (_, file) => <g key={`v${file}`} stroke="#967650" strokeWidth="1.2"><line x1={gridX(file)} x2={gridX(file)} y1="50" y2={file === 0 || file === 8 ? 473 : gridY(4)} />{file > 0 && file < 8 && <line x1={gridX(file)} x2={gridX(file)} y1={gridY(5)} y2="473" />}</g>)}
+    {[0, 7].map(rank => <g key={rank} stroke="#967650"><line x1={gridX(3)} y1={gridY(rank)} x2={gridX(5)} y2={gridY(rank + 2)} /><line x1={gridX(5)} y1={gridY(rank)} x2={gridX(3)} y2={gridY(rank + 2)} /></g>)}
     <text x="138" y="271" textAnchor="middle" className="river-text">楚 河</text><text x="338" y="271" textAnchor="middle" className="river-text">汉 界</text>
     {Array.from({ length: 9 }, (_, file) => <text key={file} x={x(file)} y="509" textAnchor="middle" className="board-number">{file + 1}</text>)}
     {Array.from({ length: 10 }, (_, rank) => <text key={rank} x="18" y={y(rank) + 4} textAnchor="middle" className="board-number">{rank + 1}</text>)}

@@ -1,7 +1,7 @@
 {
   "name": "xiangqi-video-reconstruction",
   "productName": "XiangQi Vedio Reconstruction",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "private": true,
   "description": "Local Xiangqi video reconstruction and replay",
   "author": "2665-crt",

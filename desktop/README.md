@@ -2,7 +2,7 @@
 
 应用名：**XiangQi Vedio Reconstruction**。
 
-推荐下载 `XiangQi-Vedio-Reconstruction-0.3.1-win-x64-portable.exe`，单个文件即可放到可写目录或桌面双击运行。启动时显示准备画面并自动展开内置运行环境，无需手动解压。无需安装 Python、Node.js 或浏览器，无需配置云端 API；使用内置本地模型和 CPU 推理。
+推荐下载 `XiangQi-Vedio-Reconstruction-0.3.2-win-x64-portable.exe`，单个文件即可放到可写目录或桌面双击运行。启动时显示准备画面并自动展开内置运行环境，无需手动解压。无需安装 Python、Node.js 或浏览器，无需配置云端 API；使用内置本地模型和 CPU 推理。
 
 旧版 ZIP 或源码构建生成的完整程序目录仍须保留全部文件，桌面应创建指向内部 EXE 的快捷方式。内部 EXE 不能脱离 `icudtl.dat`、`resources` 等同级依赖单独使用。
 

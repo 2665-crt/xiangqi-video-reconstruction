@@ -17,7 +17,7 @@ export const api = {
   exportRecording: (task: Task, interval_s: number) => request<RecordingJob>(`/api/tasks/${task.id}/recordings`, json('POST', { revision: task.revision, interval_s })),
   recording: (id: string) => request<RecordingJob>(`/api/recordings/${id}`),
   latestRecording: (taskId: string) => request<RecordingJob | null>(`/api/tasks/${taskId}/recordings/latest`),
-  upload: (file: File) => { const body = new FormData(); body.append('file', file); return request<Task>('/api/tasks', { method: 'POST', body }); },
+  upload: (file: File) => { if (file.size > 5 * 1024 ** 3) return Promise.reject(new Error('视频超过 5 GiB 上限')); const body = new FormData(); body.append('file', file); return request<Task>('/api/tasks', { method: 'POST', body }); },
   setup: (task: Task, start_s: number, end_s: number, calibration: Calibration | null, initial_position?: Position) =>
     request<Task>(`/api/tasks/${task.id}/setup`, json('PATCH', { revision: task.revision, start_s, end_s, calibration, initial_position })),
   analyze: (id: string) => request<Task>(`/api/tasks/${id}/analyze`, { method: 'POST' }),

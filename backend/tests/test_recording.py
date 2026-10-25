@@ -44,6 +44,18 @@ def test_unresolved_step_exports_saved_position_without_confirming_it(recording_
     assert recording_task.model_dump_json() == before
 
 
+@pytest.mark.parametrize('orientation', ['normal', 'rotated_180', 'mirrored', 'mirrored_rotated_180'])
+def test_recording_preserves_video_orientation(recording_task, orientation):
+    from app.recording import build_recording_playlist
+    from app.schemas import Calibration
+    recording_task.calibration = Calibration(corners=[{'x': 0, 'y': 0}, {'x': 719, 'y': 0},
+                                                      {'x': 719, 'y': 1279}, {'x': 0, 'y': 1279}],
+                                              orientation=orientation)
+    payload = build_recording_playlist(recording_task, 1)
+    assert payload.get('orientation') == orientation
+    assert payload['initial_position']['pieces'][0]['color'] == 'red'
+
+
 def test_initial_draft_is_not_a_confirmed_initial_position(recording_task):
     from app.recording import build_recording_playlist
     recording_task.initial_draft, recording_task.initial_position = recording_task.initial_position, None

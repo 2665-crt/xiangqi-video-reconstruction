@@ -31,7 +31,7 @@ export function VideoPanel({ task, videoRef, editing, calibration, setCalibratio
       onDragLeave={() => { dragDepth.current = Math.max(0, dragDepth.current - 1); if (!dragDepth.current) setDragging(false); }}
       onDrop={e => { e.preventDefault(); dragDepth.current = 0; setDragging(false); const file = e.dataTransfer.files[0]; if (file && !busy) onUpload(file); }}>
       <span className="upload-symbol"><Upload size={31} strokeWidth={1.5} aria-hidden="true" /></span>
-      <strong>{busy ? '正在上传与检查视频…' : '上传你的象棋录屏'}</strong><span>拖入视频，或点击选择文件</span><small>MP4 · 固定视角 · 棋盘完整可见 · 最大 2 GiB</small>
+      <strong>{busy ? '正在上传与检查视频…' : '上传你的象棋录屏'}</strong><span>拖入视频，或点击选择文件</span><small>MP4 · 固定视角 · 棋盘完整可见 · 最大 5 GiB</small>
     </button> : <>
       <div className="video-stage">
         {editing ? <><img src={`/api/tasks/${task.id}/frame?time_s=${startTime}`} alt="用于校准棋盘的起始时间画面" />

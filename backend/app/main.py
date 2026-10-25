@@ -23,6 +23,7 @@ from .video import iter_frames, probe_video, save_image
 from .resources import ResourceMonitor
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+MAX_VIDEO_BYTES = 5 * 1024 ** 3
 load_dotenv(PROJECT_ROOT / ".env")
 
 
@@ -164,8 +165,8 @@ def create_app(data_root: Path | None = None, recording_root: Path | None = None
             with temporary.open("wb") as output:
                 while chunk := await file.read(1024 * 1024):
                     size += len(chunk)
-                    if size > 2 * 1024 ** 3:
-                        raise HTTPException(413, "视频超过 2 GiB 上限")
+                    if size > MAX_VIDEO_BYTES:
+                        raise HTTPException(413, "视频超过 5 GiB 上限")
                     output.write(chunk)
             try:
                 metadata = probe_video(temporary)
